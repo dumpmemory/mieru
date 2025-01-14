@@ -75,19 +75,20 @@ ip netns exec sim iptables -A INPUT -p udp --dport 8964 -m statistic --mode rand
 iptables -A INPUT -p tcp --sport 8964 -m statistic --mode random --probability 0.001 -j DROP
 iptables -A INPUT -p udp --sport 8964 -m statistic --mode random --probability 0.001 -j DROP
 
-# Run TCP test.
-echo "========== BEGIN OF TCP TEST =========="
-./test/deploy/packetdrop/test_tcp.sh
-echo "==========  END OF TCP TEST  =========="
-
 # Run UDP test.
 echo "========== BEGIN OF UDP TEST =========="
 ./test/deploy/packetdrop/test_udp.sh
 echo "==========  END OF UDP TEST  =========="
+
+# Run TCP test.
+echo "========== BEGIN OF TCP TEST =========="
+./test/deploy/packetdrop/test_tcp.sh
+echo "==========  END OF TCP TEST  =========="
 
 # Remove root network namespace iptables rules.
 iptables -D INPUT -p tcp --sport 8964 -m statistic --mode random --probability 0.001 -j DROP
 iptables -D INPUT -p udp --sport 8964 -m statistic --mode random --probability 0.001 -j DROP
 
 echo "Test is successful."
+sleep 1
 exit 0

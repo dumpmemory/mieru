@@ -31,9 +31,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/enfein/mieru/pkg/http2socks"
-	"github.com/enfein/mieru/pkg/log"
-	"github.com/enfein/mieru/pkg/socks5client"
+	"github.com/enfein/mieru/v3/apis/constant"
+	"github.com/enfein/mieru/v3/pkg/log"
+	"github.com/enfein/mieru/v3/pkg/socks5"
 )
 
 const (
@@ -65,6 +65,7 @@ var (
 
 func init() {
 	log.SetFormatter(&log.DaemonFormatter{})
+	log.SetLevel("INFO")
 }
 
 func main() {
@@ -131,20 +132,21 @@ func main() {
 		var err error
 		for {
 			if *proxyMode == Socks5ProxyMode {
-				socksDialer := socks5client.DialSocks5Proxy(&socks5client.Config{
+				socksDialer := socks5.DialSocks5Proxy(&socks5.Client{
 					Host:    *localProxyHost + ":" + strconv.Itoa(*localProxyPort),
-					CmdType: socks5client.ConnectCmd,
+					CmdType: constant.Socks5ConnectCmd,
 				})
 				conn, _, _, err = socksDialer("tcp", *dstHost+":"+strconv.Itoa(*dstPort))
 			} else if *proxyMode == HTTPProxyMode {
 				tr := &http.Transport{
-					Proxy: http2socks.TransportProxyFunc("http://" + *localHTTPHost + ":" + strconv.Itoa(*localHTTPPort)),
+					Proxy: socks5.HTTPTransportProxyFunc("http://" + *localHTTPHost + ":" + strconv.Itoa(*localHTTPPort)),
 				}
 				client = &http.Client{
 					Transport: tr,
 					CheckRedirect: func(req *http.Request, via []*http.Request) error {
 						return nil
 					},
+					Timeout: 10 * time.Second,
 				}
 			} else if *proxyMode == NoProxyMode {
 				conn, err = net.Dial("tcp", *dstHost+":"+strconv.Itoa(*dstPort))
@@ -207,20 +209,21 @@ func CreateNewConnAndDoRequest(seq int, proxyMode string) {
 	var err error
 	for {
 		if proxyMode == Socks5ProxyMode {
-			socksDialer := socks5client.DialSocks5Proxy(&socks5client.Config{
+			socksDialer := socks5.DialSocks5Proxy(&socks5.Client{
 				Host:    *localProxyHost + ":" + strconv.Itoa(*localProxyPort),
-				CmdType: socks5client.ConnectCmd,
+				CmdType: constant.Socks5ConnectCmd,
 			})
 			conn, _, _, err = socksDialer("tcp", *dstHost+":"+strconv.Itoa(*dstPort))
 		} else if proxyMode == HTTPProxyMode {
 			tr := &http.Transport{
-				Proxy: http2socks.TransportProxyFunc("http://" + *localHTTPHost + ":" + strconv.Itoa(*localHTTPPort)),
+				Proxy: socks5.HTTPTransportProxyFunc("http://" + *localHTTPHost + ":" + strconv.Itoa(*localHTTPPort)),
 			}
 			client = &http.Client{
 				Transport: tr,
 				CheckRedirect: func(req *http.Request, via []*http.Request) error {
 					return nil
 				},
+				Timeout: 10 * time.Second,
 			}
 		} else if proxyMode == NoProxyMode {
 			conn, err = net.Dial("tcp", *dstHost+":"+strconv.Itoa(*dstPort))

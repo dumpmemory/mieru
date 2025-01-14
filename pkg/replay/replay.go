@@ -16,11 +16,11 @@
 package replay
 
 import (
-	"encoding/binary"
+	"hash/fnv"
 	"sync"
 	"time"
 
-	"github.com/enfein/mieru/pkg/metrics"
+	"github.com/enfein/mieru/v3/pkg/metrics"
 )
 
 const (
@@ -29,10 +29,13 @@ const (
 
 var (
 	// Number of replay packets sent from a new session.
-	NewSession = metrics.RegisterMetric("replay", "NewSession")
+	NewSession = metrics.RegisterMetric("replay", "NewSession", metrics.COUNTER)
+
+	// Number of replay packets sent from a new session that can be decrypted.
+	NewSessionDecrypted = metrics.RegisterMetric("replay", "NewSessionDecrypted", metrics.COUNTER)
 
 	// Number of replay packets sent from a known session.
-	KnownSession = metrics.RegisterMetric("replay", "KnownSession")
+	KnownSession = metrics.RegisterMetric("replay", "KnownSession", metrics.COUNTER)
 )
 
 // ReplayCache stores the signature of recent decrypted packets to avoid
@@ -90,7 +93,14 @@ func (c *ReplayCache) IsDuplicate(data []byte, tag string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if time.Since(c.expireTime) > c.expireInterval {
+		// Both current and previous are expired.
+		c.current = make(map[uint64]string)
+		c.previous = make(map[uint64]string)
+		c.expireTime = time.Now().Add(c.expireInterval)
+	}
 	if len(c.current) >= c.capacity || time.Now().After(c.expireTime) {
+		// Move current to previous.
 		c.previous = c.current
 		c.current = make(map[uint64]string)
 		c.expireTime = time.Now().Add(c.expireInterval)
@@ -129,9 +139,7 @@ func (c *ReplayCache) Clear() {
 }
 
 func (c *ReplayCache) computeSignature(data []byte) uint64 {
-	signature := [8]byte{}
-	for i, v := range data {
-		signature[i&0x7] ^= v
-	}
-	return binary.BigEndian.Uint64(signature[:])
+	hash := fnv.New64a()
+	hash.Write(data)
+	return hash.Sum64()
 }

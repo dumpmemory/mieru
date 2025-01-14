@@ -17,21 +17,22 @@ package cli
 
 import (
 	"fmt"
+	"runtime/debug"
 
-	"github.com/enfein/mieru/pkg/log"
-	"github.com/enfein/mieru/pkg/version"
+	"github.com/enfein/mieru/v3/pkg/log"
+	"github.com/enfein/mieru/v3/pkg/version"
 )
 
-var versionFunc = func(s []string) error {
+var versionFunc = func(_ []string) error {
 	log.Infof(version.AppVersion)
 	return nil
 }
 
-var checkUpdateFunc = func(s []string) error {
-	_, msg, err := version.CheckUpdate()
-	if err != nil {
-		return fmt.Errorf("check update failed: %w", err)
+var describeBuildFunc = func(_ []string) error {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return fmt.Errorf("build info is unavailable")
 	}
-	log.Infof("%s", msg)
+	log.Infof(info.String())
 	return nil
 }

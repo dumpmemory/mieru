@@ -16,7 +16,7 @@
 package stderror
 
 // ErrorType provides a marker of runtime error.
-type ErrorType int
+type ErrorType uint8
 
 const (
 	NO_ERROR ErrorType = iota
@@ -26,3 +26,42 @@ const (
 	CRYPTO_ERROR
 	REPLAY_ERROR
 )
+
+// TypedError annotates an error with a type.
+type TypedError struct {
+	err     error
+	errType ErrorType
+}
+
+var _ error = TypedError{}
+
+func (e TypedError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
+	return ""
+}
+
+func (e TypedError) Unwrap() error {
+	return e.err
+}
+
+// WrapErrorWithType creates a new TypedError object
+// from an error and annotate it with a type.
+func WrapErrorWithType(err error, t ErrorType) TypedError {
+	return TypedError{
+		err:     err,
+		errType: t,
+	}
+}
+
+// GetErrorType returns the type associated with an error.
+func GetErrorType(err error) ErrorType {
+	if err == nil {
+		return NO_ERROR
+	}
+	if typedError, ok := err.(TypedError); ok {
+		return typedError.errType
+	}
+	return UNKNOWN_ERROR
+}

@@ -20,8 +20,8 @@ import (
 	"net"
 	"sync/atomic"
 
-	"github.com/enfein/mieru/pkg/log"
-	"github.com/enfein/mieru/pkg/stderror"
+	"github.com/enfein/mieru/v3/pkg/log"
+	"github.com/enfein/mieru/v3/pkg/stderror"
 )
 
 // BidiCopyUDP does bi-directional data copy between a proxy client UDP endpoint
@@ -40,8 +40,8 @@ func BidiCopyUDP(udpConn *net.UDPConn, tunnelConn *UDPAssociateTunnelConn) error
 				errCh <- fmt.Errorf("ReadFrom UDP connection failed: %w", err)
 				break
 			}
-			UDPAssociateInPkts.Add(1)
-			UDPAssociateInBytes.Add(int64(n))
+			UDPAssociateUploadPackets.Add(1)
+			UDPAssociateUploadBytes.Add(int64(n))
 			udpAddr := addr.Load()
 			if udpAddr == nil {
 				addr.Store(a)
@@ -74,8 +74,8 @@ func BidiCopyUDP(udpConn *net.UDPConn, tunnelConn *UDPAssociateTunnelConn) error
 				errCh <- fmt.Errorf("WriteTo UDP connetion failed: %w", err)
 				break
 			}
-			UDPAssociateOutPkts.Add(1)
-			UDPAssociateOutBytes.Add(int64(ws))
+			UDPAssociateDownloadPackets.Add(1)
+			UDPAssociateDownloadBytes.Add(int64(ws))
 		}
 	}()
 

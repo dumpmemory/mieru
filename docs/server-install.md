@@ -1,7 +1,5 @@
 # Server Installation & Configuration
 
-We recommend that users with adequate money choose large foreign cloud service providers such as AWS (except Lightsail), Azure, and GCP, which generally do not have their IPs blocked. Do not use cloud computing services from unknown sources. Proxy servers take up very little CPU and memory resources, and the final network speed depends mainly on the server's network bandwidth and line quality.
-
 The proxy server software mita needs to run on Linux. We provide both debian and RPM installers for installing mita on Debian / Ubuntu and Fedora / CentOS / Red Hat Enterprise Linux series distributions.
 
 Before installation and configuration, connect to the server via SSH and then execute the following commands.
@@ -10,45 +8,46 @@ Before installation and configuration, connect to the server via SSH and then ex
 
 ```sh
 # Debian / Ubuntu - X86_64
-curl -LSO https://github.com/enfein/mieru/releases/download/v1.15.1/mita_1.15.1_amd64.deb
+curl -LSO https://github.com/enfein/mieru/releases/download/v3.11.1/mita_3.11.1_amd64.deb
 
 # Debian / Ubuntu - ARM 64
-curl -LSO https://github.com/enfein/mieru/releases/download/v1.15.1/mita_1.15.1_arm64.deb
+curl -LSO https://github.com/enfein/mieru/releases/download/v3.11.1/mita_3.11.1_arm64.deb
 
-# Fedora / CentOS / Red Hat Enterprise Linux - X86_64
-curl -LSO https://github.com/enfein/mieru/releases/download/v1.15.1/mita-1.15.1-1.x86_64.rpm
+# RedHat / CentOS / Rocky Linux - X86_64
+curl -LSO https://github.com/enfein/mieru/releases/download/v3.11.1/mita-3.11.1-1.x86_64.rpm
 
-# Fedora / CentOS / Red Hat Enterprise Linux - ARM 64
-curl -LSO https://github.com/enfein/mieru/releases/download/v1.15.1/mita-1.15.1-1.aarch64.rpm
+# RedHat / CentOS / Rocky Linux - ARM 64
+curl -LSO https://github.com/enfein/mieru/releases/download/v3.11.1/mita-3.11.1-1.aarch64.rpm
 ```
-
-If the above link is blocked, please use your browser to download and install from the GitHub Releases page.
 
 ## Install mita package
 
 ```sh
 # Debian / Ubuntu - X86_64
-sudo dpkg -i mita_1.15.1_amd64.deb
+sudo dpkg -i mita_3.11.1_amd64.deb
 
 # Debian / Ubuntu - ARM 64
-sudo dpkg -i mita_1.15.1_arm64.deb
+sudo dpkg -i mita_3.11.1_arm64.deb
 
-# Fedora / CentOS / Red Hat Enterprise Linux - X86_64
-sudo rpm -Uvh --force mita-1.15.1-1.x86_64.rpm
+# RedHat / CentOS / Rocky Linux - X86_64
+sudo rpm -Uvh --force mita-3.11.1-1.x86_64.rpm
 
-# Fedora / CentOS / Red Hat Enterprise Linux - ARM 64
-sudo rpm -Uvh --force mita-1.15.1-1.aarch64.rpm
+# RedHat / CentOS / Rocky Linux - ARM 64
+sudo rpm -Uvh --force mita-3.11.1-1.aarch64.rpm
 ```
 
-## Grant permissions
+Those instructions can also be used to upgrade the version of mita software package.
+
+## Grant permissions, logout and login again to make the change effective
 
 ```sh
 sudo usermod -a -G mita $USER
 
-sudo reboot
+# logout
+exit
 ```
 
-## After reboot, reconnect the server via SSH, check mita daemon status
+## Reconnect the server via SSH, check mita daemon status
 
 ```sh
 systemctl status mita
@@ -62,11 +61,11 @@ If the output contains `active (running)`, it means that the mita daemon is alre
 mita status
 ```
 
-If the installation is just completed, the output will be `mieru server status is "IDLE"`, indicating that mita has not yet listening to requests from the mieru client.
+If the installation is just completed, the output will be `mita server status is "IDLE"`, indicating that mita has not yet listening to requests from the mieru client.
 
 ## Modify proxy server settings
 
-The mieru proxy supports two different transport protocols, TCP and UDP. To understand the differences between the protocols, please read [mieru proxy protocols](https://github.com/enfein/mieru/blob/main/docs/protocol.md). This tutorial explains the TCP protocol as an example. To use the UDP protocol, replace `TCP` with `UDP` in all configuration files.
+The mieru proxy supports two different transport protocols, TCP and UDP. To understand the differences between the protocols, please read [mieru proxy protocols](./protocol.md).
 
 Users should call
 
@@ -74,45 +73,15 @@ Users should call
 mita apply config <FILE>
 ```
 
-to modify the proxy server settings. Here `<FILE>` is a JSON formatted file. We provide a configuration template in the `configs/templates/server_config.json` file in the root of the project. The contents of this template are as follows.
+to modify the proxy server settings. `<FILE>` is a JSON formatted configuration file. This configuration file does not need to specify the full proxy server settings. When you run command `mita apply config <FILE>`, the contents of the file will be merged into any existing proxy server settings.
+
+Below is an example of the server configuration file.
 
 ```js
 {
     "portBindings": [
         {
-            "port": -1,
-            "protocol": "TCP"
-        }
-    ],
-    "users": [
-        {
-            "name": "<username@example.com>",
-            "password": "<your-password>"
-        }
-    ],
-    "loggingLevel": "INFO",
-    "mtu": 1400
-}
-```
-
-Please download or copy this template to your server, open it in a text editor, and modify the following fields.
-
-1. The `portBindings` -> `port` property is the TCP or UDP port number that mita listens on, specify a value from 1025 to 65535. **Please make sure that the firewall allows communication using this port.**
-2. fill in the `users` -> `name` property with the user name.
-3. Fill in the `users` -> `password` property with the user's password.
-4. The `mtu` property is the maximum data link layer payload size when using the UDP proxy protocol. The default value is 1400. You can choose a value between 1280 and 1500.
-
-In addition to this, mita can listen to several different ports. We recommend using multiple ports in both server and client configurations to mitigate blocking.
-
-You can also create multiple users if you want to share the proxy for others to use.
-
-Here is an example of the server configuration file.
-
-```js
-{
-    "portBindings": [
-        {
-            "port": 2012,
+            "portRange": "2012-2022",
             "protocol": "TCP"
         },
         {
@@ -134,6 +103,16 @@ Here is an example of the server configuration file.
     "mtu": 1400
 }
 ```
+
+1. The `portBindings` -> `port` property is the TCP or UDP port number that mita listens on, specify a value from 1025 to 65535. If you want to listen to a range of consecutive port numbers, you can also use the `portRange` property instead. **Please make sure that the firewall allows communication using these ports.**
+2. The `portBindings` -> `protocol` property can be set to `TCP` or `UDP`.
+3. Fill in the `users` -> `name` property with the user name.
+4. Fill in the `users` -> `password` property with the user's password.
+5. [Optional] The `mtu` property is the maximum transport layer payload size when using the UDP proxy protocol. The default value is 1400. The minimum value is 1280.
+
+In addition to this, mita can listen to several different ports. We recommend using multiple ports in both server and client configurations.
+
+You can also create multiple users if you want to share the proxy for others to use.
 
 Assuming that on the server, the configuration file name is `server_config.json`, call the command `mita apply config server_config.json` to write the configuration after the file is modified.
 
@@ -163,7 +142,7 @@ Then, use command
 mita status
 ```
 
-to check working status. If `mieru server status is "RUNNING"` is returned here, it means that the proxy service is running and can process client requests.
+to check working status. If `mita server status is "RUNNING"` is returned here, it means that the proxy service is running and can process client requests.
 
 If you want to stop the proxy service, use command
 
@@ -171,9 +150,138 @@ If you want to stop the proxy service, use command
 mita stop
 ```
 
-Note that each time you change the settings with `mita apply config <FILE>`, you need to restart the service with `mita stop` and `mita start` for the new settings to take effect.
+Note that each time you change the settings with `mita apply config <FILE>`, you need to restart the service with `mita stop` and `mita start` for the new settings to take effect. An exception is, if you only change `users` or `loggingLevel` settings, you may run `mita reload` to load the new settings, which will not disturb active connections between server and client.
 
-After starting the proxy service, proceed to [Client Installation & Configuration](https://github.com/enfein/mieru/blob/main/docs/client-install.md).
+After starting the proxy service, proceed to [Client Installation & Configuration](./client-install.md).
+
+## Advanced Settings
+
+### BBR Congestion Control Algorithm
+
+[BBR](https://en.wikipedia.org/wiki/TCP_congestion_control#TCP_BBR) is a congestion control algorithm that does not rely on packet loss. Under poor network conditions, network transmission using BBR is faster than traditional algorithms.
+
+mieru's UDP transmission protocol already uses the BBR algorithm.
+
+Under the project root directory, we provide a script `tools/enable_tcp_bbr.py`, which allows users to enable BBR algorithm on TCP transmission protocol on Linux.
+
+```sh
+sudo ./tools/enable_tcp_bbr.py
+```
+
+That script can be used on both server side and client side.
+
+### Configuring Outbound Proxy
+
+The outbound proxy feature allows mieru to work with other proxy tools to form a proxy chain. An example of the network topology of a proxy chain is shown in the diagram below:
+
+```
+mieru client -> GFW -> mita server -> cloudflare proxy client -> cloudflare CDN -> target website
+```
+
+Through proxy chain, the target website sees the IP address of the cloudflare CDN, not the address of the mita server.
+
+Below is an example to configure a proxy chain.
+
+```js
+{
+    "egress": {
+        "proxies": [
+            {
+                "name": "cloudflare",
+                "protocol": "SOCKS5_PROXY_PROTOCOL",
+                "host": "127.0.0.1",
+                "port": 4000,
+                "socks5Authentication": {
+                    "user": "shilishanlu",
+                    "password": "buhuanjian"
+                }
+            }
+        ],
+        "rules": [
+            {
+                "ipRanges": ["*"],
+                "domainNames": ["*"],
+                "action": "PROXY",
+                "proxyName": "cloudflare"
+            }
+        ]
+    }
+}
+```
+
+1. In the `egress` -> `proxies` property, list the information of outbound proxy servers. The current version only supports socks5 outbound, so the value of `protocol` must be set to `SOCKS5_PROXY_PROTOCOL`. If the outbound proxy server requires socks5 username and password authentication, please fill in the `socks5Authentication` property. Otherwise, please remove the `socks5Authentication` property.
+2. In the `egress` -> `rules` property, list outbound rules. The current version allows users to add up to one rule, and the values of `ipRanges`, `domainNames`, and `action` must be the same as the example above. `proxyName` needs to point to a proxy that exists in `egress` -> `proxies` property.
+
+If you want to turn off the outbound proxy feature, simply set the `egress` property to an empty value `{}`.
+
+Note that proxy chain is different from nested proxy. An example of the network topology of a nested proxy is shown in the diagram below:
+
+```
+Tor browser -> mieru client -> GFW -> mita server -> Tor network -> target website
+```
+
+For information on how to configure nested proxy on a Tor browser, please refer to the [Security Guide](./security.md).
+
+### DNS Policy in IPv4 / IPv6 Dual-Stack Network
+
+When a proxy client requests a target website using a domain name instead of an IP address, the proxy server needs to initiate a DNS request. If the proxy server is in an IPv4 / IPv6 dual-stack network, you can adjust the DNS policy using the following configuration:
+
+```js
+{
+    "dns": {
+        "dualStack": "USE_FIRST_IP"
+    }
+}
+```
+
+The `dns` -> `dualStack` attribute supports the following values:
+
+1. `USE_FIRST_IP`: Always use the first IP address returned by the DNS server. This is the default policy.
+2. `PREFER_IPv4`: Prefer to use the first IPv4 address returned by the DNS server. If there is no IPv4 address, use the first IPv6 address.
+3. `PREFER_IPv6`: Prefer to use the first IPv6 address returned by the DNS server. If there is no IPv6 address, use the first IPv4 address.
+4. `ONLY_IPv4`: Force to use the first IPv4 address returned by the DNS server. If there is no IPv4 address, the connection fails.
+5. `ONLY_IPv6`: Force to use the first IPv6 address returned by the DNS server. If there is no IPv6 address, the connection fails.
+
+### Limiting User Traffic
+
+We can use the `users` -> `quotas` property to limit the amount of traffic a user is allowed to use. For example, if you want user "ducaiguozei" to use no more than 1 GB of traffic within 1 day, and no more than 10 GB within 30 days, you can apply the following settings.
+
+```js
+{
+    "portBindings": [
+        {
+            "portRange": "2012-2022",
+            "protocol": "TCP"
+        },
+        {
+            "port": 2027,
+            "protocol": "TCP"
+        }
+    ],
+    "users": [
+        {
+            "name": "ducaiguozei",
+            "password": "xijinping",
+            "quotas": [
+                {
+                    "days": 1,
+                    "megabytes": 1024
+                },
+                {
+                    "days": 30,
+                    "megabytes": 10240
+                }
+            ]
+        },
+        {
+            "name": "meiyougongchandang",
+            "password": "caiyouxinzhongguo"
+        }
+    ],
+    "loggingLevel": "INFO",
+    "mtu": 1400
+}
+```
 
 ## [Optional] Install NTP network time synchronization service
 
@@ -185,9 +293,6 @@ To ensure that the server system time is accurate, we recommend that users insta
 # Debian / Ubuntu
 sudo apt-get install ntp
 
-# Fedora
+# RedHat / CentOS / Rocky Linux
 sudo dnf install ntp
-
-# CentOS / Red Hat Enterprise Linux
-sudo yum install ntp
 ```

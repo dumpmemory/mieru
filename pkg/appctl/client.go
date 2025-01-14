@@ -19,20 +19,31 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
-	pb "github.com/enfein/mieru/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/pkg/log"
-	"github.com/enfein/mieru/pkg/socks5"
-	"github.com/enfein/mieru/pkg/stderror"
+	"github.com/enfein/mieru/v3/pkg/appctl/appctlcommon"
+	"github.com/enfein/mieru/v3/pkg/appctl/appctlgrpc"
+	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+	"github.com/enfein/mieru/v3/pkg/common"
+	"github.com/enfein/mieru/v3/pkg/log"
+	"github.com/enfein/mieru/v3/pkg/metrics"
+	"github.com/enfein/mieru/v3/pkg/protocol"
+	"github.com/enfein/mieru/v3/pkg/socks5"
+	"github.com/enfein/mieru/v3/pkg/stderror"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
+)
+
+const (
+	EnvMieruConfigFile     = "MIERU_CONFIG_FILE"
+	EnvMieruConfigJSONFile = "MIERU_CONFIG_JSON_FILE"
 )
 
 var (
@@ -62,6 +73,9 @@ var (
 
 	// clientSocks5ServerRef holds a pointer to client socks5 server.
 	clientSocks5ServerRef atomic.Pointer[socks5.Server]
+
+	// clientMuxRef holds a pointer to client multiplexier.
+	clientMuxRef atomic.Pointer[protocol.Mux]
 )
 
 func SetClientRPCServerRef(server *grpc.Server) {
@@ -72,9 +86,13 @@ func SetClientSocks5ServerRef(server *socks5.Server) {
 	clientSocks5ServerRef.Store(server)
 }
 
+func SetClientMuxRef(mux *protocol.Mux) {
+	clientMuxRef.Store(mux)
+}
+
 // clientLifecycleService implements ClientLifecycleService defined in lifecycle.proto.
 type clientLifecycleService struct {
-	pb.UnimplementedClientLifecycleServiceServer
+	appctlgrpc.UnimplementedClientLifecycleServiceServer
 }
 
 func (c *clientLifecycleService) GetStatus(ctx context.Context, req *pb.Empty) (*pb.AppStatusMsg, error) {
@@ -106,23 +124,43 @@ func (c *clientLifecycleService) Exit(ctx context.Context, req *pb.Empty) (*pb.E
 	return &pb.Empty{}, nil
 }
 
+func (c *clientLifecycleService) GetMetrics(ctx context.Context, req *pb.Empty) (*pb.Metrics, error) {
+	b, err := metrics.GetMetricsAsJSON()
+	if err != nil {
+		return &pb.Metrics{}, err
+	}
+	return &pb.Metrics{Json: proto.String(string(b))}, nil
+}
+
+func (c *clientLifecycleService) GetSessionInfo(context.Context, *pb.Empty) (*pb.SessionInfo, error) {
+	mux := clientMuxRef.Load()
+	if mux == nil {
+		return &pb.SessionInfo{}, fmt.Errorf("client multiplexier is unavailable")
+	}
+	return &pb.SessionInfo{Table: mux.ExportSessionInfoTable()}, nil
+}
+
 func (c *clientLifecycleService) GetThreadDump(ctx context.Context, req *pb.Empty) (*pb.ThreadDump, error) {
-	return &pb.ThreadDump{ThreadDump: proto.String(string(getThreadDump()))}, nil
+	return &pb.ThreadDump{ThreadDump: proto.String(common.GetAllStackTrace())}, nil
 }
 
 func (c *clientLifecycleService) StartCPUProfile(ctx context.Context, req *pb.ProfileSavePath) (*pb.Empty, error) {
-	err := startCPUProfile(req.GetFilePath())
+	err := common.StartCPUProfile(req.GetFilePath())
 	return &pb.Empty{}, err
 }
 
 func (c *clientLifecycleService) StopCPUProfile(ctx context.Context, req *pb.Empty) (*pb.Empty, error) {
-	stopCPUProfile()
+	common.StopCPUProfile()
 	return &pb.Empty{}, nil
 }
 
 func (c *clientLifecycleService) GetHeapProfile(ctx context.Context, req *pb.ProfileSavePath) (*pb.Empty, error) {
-	err := getHeapProfile(req.GetFilePath())
+	err := common.GetHeapProfile(req.GetFilePath())
 	return &pb.Empty{}, err
+}
+
+func (c *clientLifecycleService) GetMemoryStatistics(ctx context.Context, req *pb.Empty) (*pb.MemoryStatistics, error) {
+	return &pb.MemoryStatistics{Json: proto.String(common.GetMemoryStats())}, nil
 }
 
 // NewClientLifecycleService creates a new ClientLifecycleService RPC server.
@@ -132,7 +170,7 @@ func NewClientLifecycleService() *clientLifecycleService {
 
 // NewClientLifecycleRPCClient creates a new ClientLifecycleService RPC client.
 // It loads client config to find the server address.
-func NewClientLifecycleRPCClient(ctx context.Context) (pb.ClientLifecycleServiceClient, error) {
+func NewClientLifecycleRPCClient() (appctlgrpc.ClientLifecycleServiceClient, error) {
 	config, err := LoadClientConfig()
 	if err != nil {
 		return nil, fmt.Errorf("LoadClientConfig() failed: %w", err)
@@ -144,17 +182,18 @@ func NewClientLifecycleRPCClient(ctx context.Context) (pb.ClientLifecycleService
 		return nil, fmt.Errorf("RPC port number %d is invalid", config.GetRpcPort())
 	}
 	rpcAddr := "localhost:" + strconv.Itoa(int(config.GetRpcPort()))
-	return newClientLifecycleRPCClient(ctx, rpcAddr)
+	return newClientLifecycleRPCClient(rpcAddr)
 }
 
-// IsClientDaemonRunning detects if client daemon is running by using ClientLifecycleService.GetStatus() RPC.
+// IsClientDaemonRunning detects if client daemon is running by using
+// ClientLifecycleService.GetStatus() RPC.
 func IsClientDaemonRunning(ctx context.Context) error {
-	timedctx, cancelFunc := context.WithTimeout(ctx, RPCTimeout)
-	defer cancelFunc()
-	client, err := NewClientLifecycleRPCClient(timedctx)
+	client, err := NewClientLifecycleRPCClient()
 	if err != nil {
 		return fmt.Errorf("NewClientLifecycleRPCClient() failed: %w", err)
 	}
+	timedctx, cancelFunc := context.WithTimeout(ctx, RPCTimeout)
+	defer cancelFunc()
 	if _, err = client.GetStatus(timedctx, &pb.Empty{}); err != nil {
 		return fmt.Errorf("ClientLifecycleService.GetStatus() failed: %w", err)
 	}
@@ -167,9 +206,9 @@ func GetJSONClientConfig() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("LoadClientConfig() failed: %w", err)
 	}
-	b, err := jsonMarshalOption.Marshal(config)
+	b, err := common.MarshalJSON(config)
 	if err != nil {
-		return "", fmt.Errorf("protojson.Marshal() failed: %w", err)
+		return "", fmt.Errorf("common.MarshalJSON() failed: %w", err)
 	}
 	return string(b), nil
 }
@@ -221,8 +260,8 @@ func LoadClientConfig() (*pb.ClientConfig, error) {
 			return nil, fmt.Errorf("proto.Unmarshal() failed: %w", err)
 		}
 	case JSON_CONFIG_FILE_TYPE:
-		if err := Unmarshal(b, c); err != nil {
-			return nil, fmt.Errorf("Unmarshal() failed: %w", err)
+		if err := common.UnmarshalJSON(b, c); err != nil {
+			return nil, fmt.Errorf("common.UnmarshalJSON() failed: %w", err)
 		}
 	default:
 		return nil, fmt.Errorf("config file type is invalid")
@@ -255,8 +294,8 @@ func StoreClientConfig(config *pb.ClientConfig) error {
 			return fmt.Errorf("proto.Marshal() failed: %w", err)
 		}
 	case JSON_CONFIG_FILE_TYPE:
-		if b, err = Marshal(config); err != nil {
-			return fmt.Errorf("Marshal() failed: %w", err)
+		if b, err = common.MarshalJSON(config); err != nil {
+			return fmt.Errorf("common.MarshalJSON() failed: %w", err)
 		}
 	default:
 		return fmt.Errorf("config file type is invalid")
@@ -277,19 +316,32 @@ func ApplyJSONClientConfig(path string) error {
 		return fmt.Errorf("os.ReadFile(%q) failed: %w", path, err)
 	}
 	c := &pb.ClientConfig{}
-	if err = jsonUnmarshalOption.Unmarshal(b, c); err != nil {
-		return fmt.Errorf("protojson.Unmarshal() failed: %w", err)
+	if err = common.UnmarshalJSON(b, c); err != nil {
+		return fmt.Errorf("common.UnmarshalJSON() failed: %w", err)
 	}
 	return applyClientConfig(c)
 }
 
-// ApplyJSONClientConfig applies user provided client config URL.
+// ApplyURLClientConfig applies user provided client config URL.
 func ApplyURLClientConfig(u string) error {
-	c, err := URLToClientConfig(u)
-	if err != nil {
-		return fmt.Errorf("URLToClientConfig() failed: %w", err)
+	if strings.HasPrefix(u, "mieru://") {
+		c, err := URLToClientConfig(u)
+		if err != nil {
+			return fmt.Errorf("URLToClientConfig() failed: %w", err)
+		}
+		return applyClientConfig(c)
+	} else if strings.HasPrefix(u, "mierus://") {
+		p, err := URLToClientProfile(u)
+		if err != nil {
+			return fmt.Errorf("URLToClientProfile() failed: %w", err)
+		}
+		c := &pb.ClientConfig{
+			Profiles: []*pb.ClientProfile{p},
+		}
+		return applyClientConfig(c)
+	} else {
+		return fmt.Errorf("unrecognized URL scheme. URL must begin with mieru:// or mierus://")
 	}
-	return applyClientConfig(c)
 }
 
 // DeleteClientConfigProfile deletes a profile stored in client config.
@@ -321,56 +373,20 @@ func DeleteClientConfigProfile(profileName string) error {
 //
 // A client config patch must satisfy:
 // 1. it has 0 or more profile
-// 2. for each profile
-// 2.1. profile name is not empty
-// 2.2. user name is not empty
-// 2.3. user has either a password or a hashed password
-// 2.4. it has at least 1 server, and for each server
-// 2.4.1. the server has either IP address or domain name
-// 2.4.2. if set, server's IP address is parsable
-// 2.4.3. the server has at least 1 port binding, and for each port binding
-// 2.4.3.1. port number is valid
-// 2.4.3.2. protocol is valid
-// 2.5. if set, MTU is valid
+// 2. validate each profile
+// 3. for each socks5 authentication, the user and password are not empty
 func ValidateClientConfigPatch(patch *pb.ClientConfig) error {
 	for _, profile := range patch.GetProfiles() {
-		name := profile.GetProfileName()
-		if name == "" {
-			return fmt.Errorf("profile name is not set")
+		if err := appctlcommon.ValidateClientConfigSingleProfile(profile); err != nil {
+			return err
 		}
-		user := profile.GetUser()
-		if user.GetName() == "" {
-			return fmt.Errorf("user name is not set")
+	}
+	for _, auth := range patch.GetSocks5Authentication() {
+		if auth.GetUser() == "" {
+			return fmt.Errorf("socks5 authentication user is not set")
 		}
-		if user.GetPassword() == "" && user.GetHashedPassword() == "" {
-			return fmt.Errorf("user password is not set")
-		}
-		servers := profile.GetServers()
-		if len(servers) == 0 {
-			return fmt.Errorf("servers are not set")
-		}
-		for _, server := range servers {
-			if server.GetIpAddress() == "" && server.GetDomainName() == "" {
-				return fmt.Errorf("neither server IP address nor domain name is set")
-			}
-			if server.GetIpAddress() != "" && net.ParseIP(server.GetIpAddress()) == nil {
-				return fmt.Errorf("failed to parse IP address %q", server.GetIpAddress())
-			}
-			portBindings := server.GetPortBindings()
-			if len(portBindings) == 0 {
-				return fmt.Errorf("server port binding is not set")
-			}
-			for _, binding := range portBindings {
-				if binding.GetPort() < 1 || binding.GetPort() > 65535 {
-					return fmt.Errorf("server port number %d is invalid", binding.GetPort())
-				}
-				if binding.GetProtocol() == pb.TransportProtocol_UNKNOWN_TRANSPORT_PROTOCOL {
-					return fmt.Errorf("server protocol is not set")
-				}
-			}
-		}
-		if profile.GetMtu() != 0 && (profile.GetMtu() < 1280 || profile.GetMtu() > 1500) {
-			return fmt.Errorf("MTU value %d is out of range, valid range is [1280, 1500]", profile.GetMtu())
+		if auth.GetPassword() == "" {
+			return fmt.Errorf("socks5 authentication password is not set")
 		}
 	}
 	return nil
@@ -441,14 +457,23 @@ func GetActiveProfileFromConfig(config *pb.ClientConfig, name string) (*pb.Clien
 	return nil, fmt.Errorf("profile %q is not found", name)
 }
 
+// ClientUpdaterHistoryPath returns the file path to retrieve
+// client updater history.
+func ClientUpdaterHistoryPath() (string, error) {
+	if err := prepareClientConfigDir(); err != nil {
+		return "", err
+	}
+	return filepath.Join(cachedClientConfigDir, "client.updater.pb"), nil
+}
+
 // newClientLifecycleRPCClient creates a new ClientLifecycleService RPC client
 // and connects to the given server address.
-func newClientLifecycleRPCClient(ctx context.Context, serverAddr string) (pb.ClientLifecycleServiceClient, error) {
-	conn, err := grpc.DialContext(ctx, serverAddr, grpc.WithInsecure())
+func newClientLifecycleRPCClient(serverAddr string) (appctlgrpc.ClientLifecycleServiceClient, error) {
+	conn, err := grpc.NewClient(serverAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(MaxRecvMsgSize)))
 	if err != nil {
-		return nil, fmt.Errorf("grpc.DialContext() failed: %w", err)
+		return nil, fmt.Errorf("grpc.NewClient() failed: %w", err)
 	}
-	return pb.NewClientLifecycleServiceClient(conn), nil
+	return appctlgrpc.NewClientLifecycleServiceClient(conn), nil
 }
 
 // prepareClientConfigDir creates the client config directory if needed.
@@ -468,12 +493,12 @@ func prepareClientConfigDir() error {
 // If environment variable MIERU_CONFIG_FILE or MIERU_CONFIG_JSON_FILE is specified,
 // those values are returned.
 func clientConfigFilePath() (string, ConfigFileType, error) {
-	if v, found := os.LookupEnv("MIERU_CONFIG_FILE"); found {
+	if v, found := os.LookupEnv(EnvMieruConfigFile); found {
 		cachedClientConfigFilePath = v
 		cachedClientConfigDir = filepath.Dir(v)
 		return cachedClientConfigFilePath, PROTOBUF_CONFIG_FILE_TYPE, nil
 	}
-	if v, found := os.LookupEnv("MIERU_CONFIG_JSON_FILE"); found {
+	if v, found := os.LookupEnv(EnvMieruConfigJSONFile); found {
 		cachedClientConfigFilePath = v
 		cachedClientConfigDir = filepath.Dir(v)
 		return cachedClientConfigFilePath, JSON_CONFIG_FILE_TYPE, nil
@@ -579,6 +604,10 @@ func mergeClientConfigByProfile(dst, src *pb.ClientConfig) {
 	if src.HttpProxyListenLAN != nil {
 		httpProxyListenLAN = src.HttpProxyListenLAN
 	}
+	var socks5Authentication []*pb.Auth = dst.Socks5Authentication
+	if src.Socks5Authentication != nil {
+		socks5Authentication = src.Socks5Authentication
+	}
 
 	proto.Reset(dst)
 
@@ -592,6 +621,7 @@ func mergeClientConfigByProfile(dst, src *pb.ClientConfig) {
 	dst.Socks5ListenLAN = socks5ListenLAN
 	dst.HttpProxyPort = httpProxyPort
 	dst.HttpProxyListenLAN = httpProxyListenLAN
+	dst.Socks5Authentication = socks5Authentication
 }
 
 // deleteClientConfigFile deletes the client config file.

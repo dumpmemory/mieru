@@ -7,8 +7,11 @@ import (
 	"io"
 	"net"
 	"testing"
+	"time"
 
-	"github.com/enfein/mieru/pkg/testtool"
+	"github.com/enfein/mieru/v3/apis/constant"
+	"github.com/enfein/mieru/v3/pkg/stderror"
+	"github.com/enfein/mieru/v3/pkg/testtool"
 )
 
 func TestRequestConnect(t *testing.T) {
@@ -23,7 +26,6 @@ func TestRequestConnect(t *testing.T) {
 			t.Errorf("Accept() failed: %v", err)
 			return
 		}
-		defer conn.Close()
 
 		buf := make([]byte, 4)
 		if _, err := io.ReadFull(conn, buf); err != nil {
@@ -49,6 +51,9 @@ func TestRequestConnect(t *testing.T) {
 
 	// Create the connect request.
 	clientConn, serverConn := testtool.BufPipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
 	clientConn.Write([]byte{5, 1, 0, 1, 127, 0, 0, 1})
 	port := []byte{0, 0}
 	binary.BigEndian.PutUint16(port, uint16(dstAddr.Port))
@@ -56,17 +61,22 @@ func TestRequestConnect(t *testing.T) {
 	clientConn.Write([]byte("ping"))
 
 	// Socks server handles the request.
-	req, err := NewRequest(serverConn)
-	if err != nil {
-		t.Fatalf("NewRequest() failed: %v", err)
-	}
-	if err := s.handleRequest(context.Background(), req, serverConn); err != nil {
-		t.Fatalf("handleRequest() failed: %v", err)
-	}
+	go func() {
+		req, err := s.newRequest(serverConn)
+		if err != nil {
+			t.Errorf("NewRequest() failed: %v", err)
+		}
+		if err := s.handleRequest(context.Background(), req, serverConn); err != nil && !stderror.IsEOF(err) && !stderror.IsClosed(err) {
+			t.Errorf("handleRequest() failed: %v", err)
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
 
 	// Verify response from socks server.
 	out := make([]byte, 14)
-	clientConn.Read(out)
+	if _, err := io.ReadFull(clientConn, out); err != nil {
+		t.Fatalf("io.ReadFull() failed: %v", err)
+	}
 	want := []byte{
 		5, 0, 0, 1,
 		127, 0, 0, 1,
@@ -89,7 +99,7 @@ func TestRequestUnsupportedCommand(t *testing.T) {
 		resp []byte
 	}{
 		{
-			[]byte{5, bindCommand, 0, 1, 127, 0, 0, 1, 0, 1},
+			[]byte{5, constant.Socks5BindCmd, 0, 1, 127, 0, 0, 1, 0, 1},
 			[]byte{5, commandNotSupported, 0, 1, 0, 0, 0, 0, 0, 0},
 		},
 	}
@@ -109,7 +119,7 @@ func TestRequestUnsupportedCommand(t *testing.T) {
 		clientConn.Write(tc.req)
 
 		// Socks server handles the request.
-		req, err := NewRequest(serverConn)
+		req, err := s.newRequest(serverConn)
 		if err != nil {
 			t.Fatalf("NewRequest() failed: %v", err)
 		}

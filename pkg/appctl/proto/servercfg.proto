@@ -17,18 +17,9 @@ syntax = "proto3";
 
 package appctl;
 
-import "empty.proto";
-import "endpoint.proto";
-import "logging.proto";
-import "user.proto";
+import "base.proto";
 
-option go_package = "github.com/enfein/mieru/pkg/appctl/appctlpb";
-
-message ServerAdvancedSettings {
-    // Allow using socks5 to access resources served in localhost.
-    // This option should be set to false unless required due to testing purpose.
-    optional bool allowLocalDestination = 1;
-}
+option go_package = "github.com/enfein/mieru/v3/pkg/appctl/appctlpb";
 
 message ServerConfig {
     // Server's port-protocol bindings.
@@ -44,14 +35,82 @@ message ServerConfig {
     optional LoggingLevel loggingLevel = 4;
 
     // Maximum transmission unit of L2 payload.
-    // This setting only applies to UDP protocol.
+    // This setting only applies to UDP protocol egress traffic.
     optional int32 mtu = 5;
+
+    // Egress proxies and rules.
+    optional Egress egress = 6;
+
+    // How to resolve IP address when the client send a request
+    // with a domain name.
+    optional DNS dns = 7;
 }
 
-service ServerConfigService {
-    // Fetch the server config.
-    rpc GetConfig(Empty) returns (ServerConfig);
+message ServerAdvancedSettings {
+    // Allow using socks5 to access resources served in localhost.
+    // This option should be set to false unless required due to testing purpose.
+    optional bool allowLocalDestination = 1;
+}
 
-    // Update server config.
-    rpc SetConfig(ServerConfig) returns (ServerConfig);
+message Egress {
+    // A list of proxies.
+    repeated EgressProxy proxies = 1;
+
+    // A list of rules.
+    // If no rule is matched, the default action is DIRECT.
+    repeated EgressRule rules = 2;
+}
+
+message EgressProxy {
+    optional string name = 1;
+
+    optional ProxyProtocol protocol = 2;
+
+    // Proxy IP address or domain name.
+    optional string host = 3;
+
+    // Proxy port number.
+    optional int32 port = 4;
+
+    // Credential to authenticate egress socks5 proxy.
+    // If the proxy protocol is not socks5, this is ignored.
+    optional Auth socks5Authentication = 5;
+}
+
+enum ProxyProtocol {
+    UNKNOWN_PROXY_PROTOCOL = 0;
+    SOCKS5_PROXY_PROTOCOL = 1;
+}
+
+message EgressRule {
+    // A list of CIDR to match the rule.
+    // Use "*" to match all IP addresses.
+    repeated string ipRanges = 1;
+
+    // A list of domain names to match the rule.
+    // Use "*" to match all domain names.
+    repeated string domainNames = 2;
+
+    // The action to do when the rule is matched.
+    optional EgressAction action = 3;
+
+    // The name of proxy to connect.
+    // This is required when the action is PROXY.
+    optional string proxyName = 4;
+}
+
+enum EgressAction {
+    // Use proxy to connect to the destination.
+    PROXY = 0;
+
+    // Directly connect to the destination.
+    DIRECT = 1;
+
+    // Do not connect to the destination.
+    REJECT = 2;
+}
+
+message DNS {
+    // Pick up IP address from IP version preference.
+    optional DualStack dualStack = 1;
 }

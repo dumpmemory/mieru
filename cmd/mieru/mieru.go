@@ -17,13 +17,16 @@
 package main
 
 import (
-	"github.com/enfein/mieru/pkg/appctl"
-	"github.com/enfein/mieru/pkg/cli"
-	"github.com/enfein/mieru/pkg/log"
+	"runtime/debug"
+
+	"github.com/enfein/mieru/v3/pkg/appctl"
+	"github.com/enfein/mieru/v3/pkg/cli"
+	"github.com/enfein/mieru/v3/pkg/log"
 )
 
 func main() {
 	appctl.SetAppType(appctl.CLIENT_APP)
+	debug.SetGCPercent(90)
 	cli.RegisterClientCommands()
 	err := cli.ParseAndExecute()
 	if err != nil {

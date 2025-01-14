@@ -19,7 +19,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/enfein/mieru/pkg/appctl/appctlpb"
+	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+	"github.com/enfein/mieru/v3/pkg/common"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -44,7 +45,7 @@ func TestApply2ClientConfig(t *testing.T) {
 	if err := deleteClientConfigFile(); err != nil {
 		t.Fatalf("failed to delete client config file")
 	}
-	if err := StoreClientConfig(&appctlpb.ClientConfig{}); err != nil {
+	if err := StoreClientConfig(&pb.ClientConfig{}); err != nil {
 		t.Fatalf("failed to create empty client config file")
 	}
 	if err := ApplyJSONClientConfig(configFile2); err != nil {
@@ -55,8 +56,8 @@ func TestApply2ClientConfig(t *testing.T) {
 		t.Errorf("LoadClientConfig() failed: %v", err)
 	}
 	if !proto.Equal(merged, want) {
-		mergedJSON, _ := jsonMarshalOption.Marshal(merged)
-		wantJSON, _ := jsonMarshalOption.Marshal(want)
+		mergedJSON, _ := common.MarshalJSON(merged)
+		wantJSON, _ := common.MarshalJSON(want)
 		t.Errorf("client config doesn't equal:\ngot = %v\nwant = %v", string(mergedJSON), string(wantJSON))
 	}
 
@@ -66,6 +67,7 @@ func TestApply2ClientConfig(t *testing.T) {
 func TestClientApplyReject(t *testing.T) {
 	cases := []string{
 		"testdata/client_reject_active_profile_mismatch.json",
+		"testdata/client_reject_invalid_http_port.json",
 		"testdata/client_reject_invalid_rpc_port.json",
 		"testdata/client_reject_mtu_too_big.json",
 		"testdata/client_reject_mtu_too_small.json",
@@ -74,13 +76,18 @@ func TestClientApplyReject(t *testing.T) {
 		"testdata/client_reject_no_port_binding.json",
 		"testdata/client_reject_no_port.json",
 		"testdata/client_reject_no_profile_name.json",
+		"testdata/client_reject_no_profiles.json",
 		"testdata/client_reject_no_protocol.json",
 		"testdata/client_reject_no_server_addr.json",
+		"testdata/client_reject_no_servers.json",
 		"testdata/client_reject_no_socks5_port.json",
 		"testdata/client_reject_no_user_name.json",
 		"testdata/client_reject_same_port_http_rpc.json",
 		"testdata/client_reject_same_port_http_socks5.json",
 		"testdata/client_reject_same_port_rpc_socks5.json",
+		"testdata/client_reject_socks5_auth_no_password.json",
+		"testdata/client_reject_socks5_auth_no_user.json",
+		"testdata/client_reject_user_has_quota.json",
 		"testdata/client_reject_wrong_ipv4_address.json",
 		"testdata/client_reject_wrong_ipv6_address.json",
 	}
@@ -138,7 +145,7 @@ func TestClientStoreConfigToJSON(t *testing.T) {
 	defer os.Unsetenv("MIERU_CONFIG_JSON_FILE")
 
 	// Store JSON configuration file.
-	if err := StoreClientConfig(&appctlpb.ClientConfig{}); err != nil {
+	if err := StoreClientConfig(&pb.ClientConfig{}); err != nil {
 		t.Fatalf("StoreClientConfig() failed: %v", err)
 	}
 	if _, err := os.Stat(configFilePath); err != nil {
@@ -171,7 +178,7 @@ func TestClientDeleteProfile(t *testing.T) {
 	if err := deleteClientConfigFile(); err != nil {
 		t.Fatalf("failed to delete client config file")
 	}
-	if err := StoreClientConfig(&appctlpb.ClientConfig{}); err != nil {
+	if err := StoreClientConfig(&pb.ClientConfig{}); err != nil {
 		t.Fatalf("failed to create empty client config file")
 	}
 	if err := ApplyJSONClientConfig(wantFile); err != nil {
@@ -182,8 +189,8 @@ func TestClientDeleteProfile(t *testing.T) {
 		t.Errorf("LoadClientConfig() failed: %v", err)
 	}
 	if !proto.Equal(got, want) {
-		gotJSON, _ := jsonMarshalOption.Marshal(got)
-		wantJSON, _ := jsonMarshalOption.Marshal(want)
+		gotJSON, _ := common.MarshalJSON(got)
+		wantJSON, _ := common.MarshalJSON(want)
 		t.Errorf("client config doesn't equal:\ngot = %v\nwant = %v", string(gotJSON), string(wantJSON))
 	}
 
@@ -213,7 +220,7 @@ func beforeClientTest(t *testing.T) {
 	if err := deleteClientConfigFile(); err != nil {
 		t.Fatalf("failed to clean client config file before the test")
 	}
-	if err := StoreClientConfig(&appctlpb.ClientConfig{}); err != nil {
+	if err := StoreClientConfig(&pb.ClientConfig{}); err != nil {
 		t.Fatalf("failed to create empty client config file before the test")
 	}
 }

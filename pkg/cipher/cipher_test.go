@@ -20,6 +20,8 @@ import (
 	crand "crypto/rand"
 	mrand "math/rand"
 	"testing"
+
+	"github.com/enfein/mieru/v3/pkg/common"
 )
 
 func TestDefaultNonceSize(t *testing.T) {
@@ -27,9 +29,9 @@ func TestDefaultNonceSize(t *testing.T) {
 	if _, err := crand.Read(key); err != nil {
 		t.Fatalf("fail to generate key: %v", err)
 	}
-	c, err := newAESGCMBlockCipher(key)
+	c, err := newXChaCha20Poly1305BlockCipher(key)
 	if err != nil {
-		t.Fatalf("newAESGCMBlockCipher() failed: %v", err)
+		t.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
 	}
 	if c.NonceSize() != DefaultNonceSize {
 		t.Errorf("got nonce size %d; want %d", c.NonceSize(), DefaultNonceSize)
@@ -41,33 +43,24 @@ func TestDefaultOverhead(t *testing.T) {
 	if _, err := crand.Read(key); err != nil {
 		t.Fatalf("fail to generate key: %v", err)
 	}
-	c, err := newAESGCMBlockCipher(key)
+	c, err := newXChaCha20Poly1305BlockCipher(key)
 	if err != nil {
-		t.Fatalf("newAESGCMBlockCipher() failed: %v", err)
+		t.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
 	}
 	if c.Overhead() != DefaultOverhead {
 		t.Errorf("got overhead size %d; want %d", c.Overhead(), DefaultOverhead)
 	}
 }
 
-func TestAESGCMBlockCipherEncryptDecrypt(t *testing.T) {
+func TestAEADBlockCipherEncryptDecrypt(t *testing.T) {
 	for i := 0; i < 1000; i++ {
-		var key []byte
-		n := mrand.Intn(3)
-		switch n {
-		case 0:
-			key = make([]byte, 16)
-		case 1:
-			key = make([]byte, 24)
-		case 2:
-			key = make([]byte, 32)
-		}
+		key := make([]byte, 32)
 		if _, err := crand.Read(key); err != nil {
 			t.Fatalf("fail to generate key: %v", err)
 		}
-		cipher, err := newAESGCMBlockCipher(key)
+		cipher, err := newXChaCha20Poly1305BlockCipher(key)
 		if err != nil {
-			t.Fatalf("newAESGCMBlockCipher() failed: %v", err)
+			t.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
 		}
 		if !cipher.IsStateless() {
 			t.Fatalf("IsStateless() = %v, want %v", cipher.IsStateless(), true)
@@ -108,17 +101,17 @@ func TestAESGCMBlockCipherEncryptDecrypt(t *testing.T) {
 	}
 }
 
-func TestAESGCMBlockCipherEncryptDecryptImplicitMode(t *testing.T) {
+func TestAEADBlockCipherEncryptDecryptImplicitMode(t *testing.T) {
 	key := make([]byte, 32)
 	if _, err := crand.Read(key); err != nil {
 		t.Fatalf("fail to generate key: %v", err)
 	}
-	sendCipher, err := newAESGCMBlockCipher(key)
+	sendCipher, err := newXChaCha20Poly1305BlockCipher(key)
 	if err != nil {
-		t.Fatalf("newAESGCMBlockCipher() failed: %v", err)
+		t.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
 	}
 	sendCipher.SetImplicitNonceMode(true)
-	recvCipher := sendCipher.Clone().(*AESGCMBlockCipher)
+	recvCipher := sendCipher.Clone().(*AEADBlockCipher)
 	if sendCipher.IsStateless() {
 		t.Fatalf("IsStateless() = %v, want %v", sendCipher.IsStateless(), false)
 	}
@@ -145,14 +138,14 @@ func TestAESGCMBlockCipherEncryptDecryptImplicitMode(t *testing.T) {
 	}
 }
 
-func TestAESGCMBlockCipherClone(t *testing.T) {
+func TestAEADBlockCipherClone(t *testing.T) {
 	key := make([]byte, 32)
 	if _, err := crand.Read(key); err != nil {
 		t.Fatalf("fail to generate key: %v", err)
 	}
-	cipher1, err := newAESGCMBlockCipher(key)
+	cipher1, err := newXChaCha20Poly1305BlockCipher(key)
 	if err != nil {
-		t.Fatalf("newAESGCMBlockCipher() failed: %v", err)
+		t.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
 	}
 	cipher1.SetImplicitNonceMode(true)
 	nonce := make([]byte, cipher1.NonceSize())
@@ -161,7 +154,7 @@ func TestAESGCMBlockCipherClone(t *testing.T) {
 	}
 	cipher1.implicitNonce = make([]byte, cipher1.NonceSize())
 	copy(cipher1.implicitNonce, nonce)
-	cipher2 := cipher1.Clone().(*AESGCMBlockCipher)
+	cipher2 := cipher1.Clone().(*AEADBlockCipher)
 
 	data := make([]byte, 4096)
 	if _, err := crand.Read(data); err != nil {
@@ -194,17 +187,17 @@ func TestAESGCMBlockCipherClone(t *testing.T) {
 	}
 }
 
-func TestAESGCMBlockCipherIncreaseNonce(t *testing.T) {
+func TestAEADBlockCipherIncreaseNonce(t *testing.T) {
 	testdata := []struct {
 		input  []byte
 		output []byte
 	}{
-		{[]byte{0x89, 0x64}, []byte{0x8a, 0x64}},
-		{[]byte{0xff, 0xff, 0xff, 0xfe}, []byte{0x00, 0x00, 0x00, 0xff}},
+		{[]byte{0x89, 0x64}, []byte{0x89, 0x65}},
+		{[]byte{0xfe, 0xff, 0xff, 0xff}, []byte{0xff, 0x00, 0x00, 0x00}},
 		{[]byte{0xff, 0xff, 0xff, 0xff}, []byte{0x00, 0x00, 0x00, 0x00}},
 	}
 
-	cipher := &AESGCMBlockCipher{enableImplicitNonce: true}
+	cipher := &AEADBlockCipher{enableImplicitNonce: true}
 	for _, tc := range testdata {
 		cipher.implicitNonce = tc.input
 		cipher.increaseNonce()
@@ -214,14 +207,18 @@ func TestAESGCMBlockCipherIncreaseNonce(t *testing.T) {
 	}
 }
 
-func TestAESGCMBlockCipherNewNonce(t *testing.T) {
+func TestAEADBlockCipherNewNonce(t *testing.T) {
 	key := make([]byte, 32)
 	if _, err := crand.Read(key); err != nil {
 		t.Fatalf("fail to generate key: %v", err)
 	}
-	c, err := newAESGCMBlockCipher(key)
+	c, err := newXChaCha20Poly1305BlockCipher(key)
 	if err != nil {
-		t.Fatalf("newAESGCMBlockCipher() failed: %v", err)
+		t.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
+	}
+	s := make(map[byte]struct{})
+	for _, c := range []byte(common.Common64Set) {
+		s[c] = struct{}{}
 	}
 	distribution := make(map[byte]int32)
 	for i := 0; i < 100000; i++ {
@@ -230,11 +227,11 @@ func TestAESGCMBlockCipherNewNonce(t *testing.T) {
 			t.Fatalf("newNonce() failed: %v", err)
 		}
 		for j, b := range nonce {
-			if j >= noncePrintablePrefixLen {
+			if j >= nonceRewritePrefixLen {
 				break
 			}
-			if b < printableCharSub || b > printableCharSup {
-				t.Fatalf("Byte %v in position %d is not a printable ASCII character", b, j)
+			if _, ok := s[b]; !ok {
+				t.Fatalf("Byte %v in position %d is not allowed", b, j)
 			}
 			distribution[b]++
 		}
@@ -256,26 +253,106 @@ func TestAESGCMBlockCipherNewNonce(t *testing.T) {
 	}
 }
 
-func TestAESGCMBlockCipherValidateKeySize(t *testing.T) {
-	testdata := []struct {
-		key []byte
-		err bool
-	}{
-		{nil, true},
-		{[]byte{}, true},
-		{make([]byte, 16), false},
-		{make([]byte, 24), false},
-		{make([]byte, 32), false},
-		{make([]byte, 48), true},
+func BenchmarkAESGCMStateless(b *testing.B) {
+	key, data := benchmarkGenKeyAndData(b)
+	block, err := newAESGCMBlockCipher(key)
+	if err != nil {
+		b.Fatalf("newAESGCMBlockCipher() failed: %v", err)
 	}
+	block.SetImplicitNonceMode(false)
+	benchmarkEncryptDecryptStateless(b, block, data)
+}
 
-	for _, tc := range testdata {
-		got := validateKeySize(tc.key)
-		if got != nil && !tc.err {
-			t.Errorf("got %v; want no error", got)
+func BenchmarkAESGCMStateful(b *testing.B) {
+	key, data := benchmarkGenKeyAndData(b)
+	block, err := newAESGCMBlockCipher(key)
+	if err != nil {
+		b.Fatalf("newAESGCMBlockCipher() failed: %v", err)
+	}
+	block.SetImplicitNonceMode(true)
+	block2 := block.Clone().(*AEADBlockCipher)
+	benchmarkEncryptDecryptStateful(b, block, block2, data)
+}
+
+func BenchmarkChaCha20Poly1305Stateless(b *testing.B) {
+	key, data := benchmarkGenKeyAndData(b)
+	block, err := newChaCha20Poly1305BlockCipher(key)
+	if err != nil {
+		b.Fatalf("newChaCha20Poly1305BlockCipher() failed: %v", err)
+	}
+	block.SetImplicitNonceMode(false)
+	benchmarkEncryptDecryptStateless(b, block, data)
+}
+
+func BenchmarkChaCha20Poly1305Stateful(b *testing.B) {
+	key, data := benchmarkGenKeyAndData(b)
+	block, err := newChaCha20Poly1305BlockCipher(key)
+	if err != nil {
+		b.Fatalf("newChaCha20Poly1305BlockCipher() failed: %v", err)
+	}
+	block.SetImplicitNonceMode(true)
+	block2 := block.Clone().(*AEADBlockCipher)
+	benchmarkEncryptDecryptStateful(b, block, block2, data)
+}
+
+func BenchmarkXChaCha20Poly1305Stateless(b *testing.B) {
+	key, data := benchmarkGenKeyAndData(b)
+	block, err := newXChaCha20Poly1305BlockCipher(key)
+	if err != nil {
+		b.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
+	}
+	block.SetImplicitNonceMode(false)
+	benchmarkEncryptDecryptStateless(b, block, data)
+}
+
+func BenchmarkXChaCha20Poly1305Stateful(b *testing.B) {
+	key, data := benchmarkGenKeyAndData(b)
+	block, err := newXChaCha20Poly1305BlockCipher(key)
+	if err != nil {
+		b.Fatalf("newXChaCha20Poly1305BlockCipher() failed: %v", err)
+	}
+	block.SetImplicitNonceMode(true)
+	block2 := block.Clone().(*AEADBlockCipher)
+	benchmarkEncryptDecryptStateful(b, block, block2, data)
+}
+
+func benchmarkEncryptDecryptStateless(b *testing.B, block BlockCipher, data []byte) {
+	b.Helper()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ciphertext, err := block.Encrypt(data)
+		if err != nil {
+			b.FailNow()
 		}
-		if got == nil && tc.err {
-			t.Errorf("got no error; want error")
+		if _, err := block.Decrypt(ciphertext); err != nil {
+			b.FailNow()
 		}
 	}
+}
+
+func benchmarkEncryptDecryptStateful(b *testing.B, sendBlock, recvBlock BlockCipher, data []byte) {
+	b.Helper()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ciphertext, err := sendBlock.Encrypt(data)
+		if err != nil {
+			b.FailNow()
+		}
+		if _, err := recvBlock.Decrypt(ciphertext); err != nil {
+			b.FailNow()
+		}
+	}
+}
+
+func benchmarkGenKeyAndData(b *testing.B) (key, data []byte) {
+	b.Helper()
+	key = make([]byte, 32)
+	data = make([]byte, 1500)
+	if _, err := crand.Read(key); err != nil {
+		b.Fatalf("Generate key failed.")
+	}
+	if _, err := crand.Read(data); err != nil {
+		b.Fatalf("Generate data failed.")
+	}
+	return
 }

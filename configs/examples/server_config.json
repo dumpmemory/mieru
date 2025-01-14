@@ -1,7 +1,7 @@
 {
     "portBindings": [
         {
-            "port": 2012,
+            "portRange": "2012-2022",
             "protocol": "TCP"
         },
         {

@@ -19,7 +19,8 @@ import (
 	"os"
 	"testing"
 
-	pb "github.com/enfein/mieru/pkg/appctl/appctlpb"
+	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+	"github.com/enfein/mieru/v3/pkg/common"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -55,8 +56,8 @@ func TestApply2ServerConfig(t *testing.T) {
 		t.Errorf("LoadServerConfig() failed: %v", err)
 	}
 	if !proto.Equal(merged, want) {
-		mergedJSON, _ := jsonMarshalOption.Marshal(merged)
-		wantJSON, _ := jsonMarshalOption.Marshal(want)
+		mergedJSON, _ := common.MarshalJSON(merged)
+		wantJSON, _ := common.MarshalJSON(want)
 		t.Errorf("server config doesn't equal:\ngot = %v\nwant = %v", string(mergedJSON), string(wantJSON))
 	}
 
@@ -65,9 +66,15 @@ func TestApply2ServerConfig(t *testing.T) {
 
 func TestServerApplyReject(t *testing.T) {
 	cases := []string{
+		"testdata/server_reject_invalid_port_range_1.json",
+		"testdata/server_reject_invalid_port_range_2.json",
+		"testdata/server_reject_invalid_port_range_3.json",
+		"testdata/server_reject_invalid_quota_days.json",
+		"testdata/server_reject_invalid_quota_megabytes.json",
 		"testdata/server_reject_mtu_too_big.json",
 		"testdata/server_reject_mtu_too_small.json",
 		"testdata/server_reject_no_password.json",
+		"testdata/server_reject_no_port_bindings.json",
 		"testdata/server_reject_no_port.json",
 		"testdata/server_reject_no_protocol.json",
 		"testdata/server_reject_no_user_name.json",

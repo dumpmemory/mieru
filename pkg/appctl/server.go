@@ -1,4 +1,4 @@
-// Copyright (C) 2021  mieru authors
+// Copyright (C) 2023  mieru authors
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -23,25 +23,23 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
-	pb "github.com/enfein/mieru/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/pkg/log"
-	"github.com/enfein/mieru/pkg/metrics"
-	"github.com/enfein/mieru/pkg/socks5"
-	"github.com/enfein/mieru/pkg/stderror"
-	"github.com/enfein/mieru/pkg/tcpsession"
-	"github.com/enfein/mieru/pkg/udpsession"
-	"github.com/enfein/mieru/pkg/util"
+	"github.com/enfein/mieru/v3/pkg/appctl/appctlcommon"
+	"github.com/enfein/mieru/v3/pkg/appctl/appctlgrpc"
+	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+	"github.com/enfein/mieru/v3/pkg/common"
+	"github.com/enfein/mieru/v3/pkg/egress"
+	"github.com/enfein/mieru/v3/pkg/log"
+	"github.com/enfein/mieru/v3/pkg/metrics"
+	"github.com/enfein/mieru/v3/pkg/protocol"
+	"github.com/enfein/mieru/v3/pkg/socks5"
+	"github.com/enfein/mieru/v3/pkg/stderror"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
-)
-
-const (
-	// ServerUDS is the UNIX domain socket that server is listening to RPC requests.
-	ServerUDS = "/var/run/mita.sock"
 )
 
 var (
@@ -50,6 +48,7 @@ var (
 
 	cachedServerConfigDir      string = "/etc/mita"
 	cachedServerConfigFilePath string = "/etc/mita/server.conf.pb"
+	cachedServerUDS            string = "/var/run/mita.sock"
 
 	// serverIOLock is required to load server config and store server config.
 	serverIOLock sync.Mutex
@@ -57,21 +56,37 @@ var (
 	// serverRPCServerRef holds a pointer to server RPC server.
 	serverRPCServerRef atomic.Pointer[grpc.Server]
 
-	// socks5ServerGroup is a collection of server socks5 servers.
-	socks5ServerGroup = socks5.NewGroup()
+	// socks5ServerGroup holds a pointer to server socks5 server.
+	socks5ServerRef atomic.Pointer[socks5.Server]
+
+	// serverMuxRef holds a pointer to server multiplexier.
+	serverMuxRef atomic.Pointer[protocol.Mux]
 )
 
 func SetServerRPCServerRef(server *grpc.Server) {
 	serverRPCServerRef.Store(server)
 }
 
-func GetSocks5ServerGroup() *socks5.ServerGroup {
-	return socks5ServerGroup
+func SetSocks5Server(server *socks5.Server) {
+	socks5ServerRef.Store(server)
+}
+
+func SetServerMuxRef(mux *protocol.Mux) {
+	serverMuxRef.Store(mux)
+}
+
+// ServerUDS returns the UNIX domain socket that mita server
+// is listening to RPC requests.
+func ServerUDS() string {
+	if v, found := os.LookupEnv("MITA_UDS_PATH"); found {
+		cachedServerUDS = v
+	}
+	return cachedServerUDS
 }
 
 // serverLifecycleService implements ServerLifecycleService defined in lifecycle.proto.
 type serverLifecycleService struct {
-	pb.UnimplementedServerLifecycleServiceServer
+	appctlgrpc.UnimplementedServerLifecycleServiceServer
 }
 
 func (s *serverLifecycleService) GetStatus(ctx context.Context, req *pb.Empty) (*pb.AppStatusMsg, error) {
@@ -86,70 +101,63 @@ func (s *serverLifecycleService) Start(ctx context.Context, req *pb.Empty) (*pb.
 	if err != nil {
 		return &pb.Empty{}, fmt.Errorf("LoadServerConfig() failed: %w", err)
 	}
+	if err = ValidateFullServerConfig(config); err != nil {
+		return &pb.Empty{}, fmt.Errorf("ValidateFullServerConfig() failed: %w", err)
+	}
 	loggingLevel := config.GetLoggingLevel().String()
 	if loggingLevel != pb.LoggingLevel_DEFAULT.String() {
 		log.SetLevel(loggingLevel)
 	}
-	if err = ValidateFullServerConfig(config); err != nil {
-		return &pb.Empty{}, fmt.Errorf("ValidateFullServerConfig() failed: %w", err)
-	}
-	if !GetSocks5ServerGroup().IsEmpty() {
-		log.Infof("socks5 server(s) already exist")
+	if socks5ServerRef.Load() != nil {
+		log.Infof("socks5 server already exist")
 		return &pb.Empty{}, nil
 	}
 
 	SetAppStatus(pb.AppStatus_STARTING)
 
-	// Set MTU for UDP sessions.
+	mux := protocol.NewMux(false).SetServerUsers(UserListToMap(config.GetUsers()))
+	SetServerMuxRef(mux)
+	mtu := common.DefaultMTU
 	if config.GetMtu() != 0 {
-		udpsession.SetGlobalMTU(config.GetMtu())
+		mtu = int(config.GetMtu())
 	}
+	endpoints, err := PortBindingsToUnderlayProperties(config.GetPortBindings(), mtu)
+	if err != nil {
+		return &pb.Empty{}, err
+	}
+	mux.SetEndpoints(endpoints)
 
-	n := len(config.GetPortBindings())
+	// Create the egress socks5 server.
+	socks5Config := &socks5.Config{
+		AllowLocalDestination: config.GetAdvancedSettings().GetAllowLocalDestination(),
+		AuthOpts: socks5.Auth{
+			ClientSideAuthentication: true,
+		},
+		DualStackPreference: common.DualStackPreference(config.GetDns().GetDualStack()),
+		EgressController:    egress.NewSocks5Controller(config.GetEgress()),
+		HandshakeTimeout:    10 * time.Second,
+	}
+	socks5Server, err := socks5.New(socks5Config)
+	if err != nil {
+		return &pb.Empty{}, fmt.Errorf(stderror.CreateSocks5ServerFailedErr, err)
+	}
+	SetSocks5Server(socks5Server)
+
+	// Run the egress socks5 server in the background.
 	var initProxyTasks sync.WaitGroup
-	initProxyTasks.Add(n)
+	initProxyTasks.Add(1)
+	go func() {
+		if err = mux.Start(); err != nil {
+			log.Fatalf("socks5 server listening failed: %v", err)
+		}
+		initProxyTasks.Done()
 
-	for i := 0; i < n; i++ {
-		// Create the egress socks5 server.
-		socks5Config := &socks5.Config{
-			AllowLocalDestination: config.GetAdvancedSettings().GetAllowLocalDestination(),
+		log.Infof("mita server daemon socks5 server is running")
+		if err = socks5Server.Serve(mux); err != nil {
+			log.Fatalf("run socks5 server failed: %v", err)
 		}
-		socks5Server, err := socks5.New(socks5Config)
-		if err != nil {
-			return &pb.Empty{}, fmt.Errorf(stderror.CreateSocks5ServerFailedErr, err)
-		}
-		protocol := config.GetPortBindings()[i].GetProtocol()
-		port := config.GetPortBindings()[i].GetPort()
-		if err := GetSocks5ServerGroup().Add(protocol.String(), int(port), socks5Server); err != nil {
-			return &pb.Empty{}, fmt.Errorf(stderror.AddSocks5ServerToGroupFailedErr, err)
-		}
-
-		// Run the egress socks5 server in the background.
-		go func() {
-			socks5Addr := util.MaybeDecorateIPv6(util.AllIPAddr()) + ":" + strconv.Itoa(int(port))
-			var l net.Listener
-			var err error
-			if protocol == pb.TransportProtocol_TCP {
-				l, err = tcpsession.ListenWithOptions(socks5Addr, UserListToMap(config.GetUsers()))
-				if err != nil {
-					log.Fatalf("tcpsession.ListenWithOptions(%q) failed: %v", socks5Addr, err)
-				}
-			} else if protocol == pb.TransportProtocol_UDP {
-				l, err = udpsession.ListenWithOptions(socks5Addr, UserListToMap(config.GetUsers()))
-				if err != nil {
-					log.Fatalf("udpsession.ListenWithOptions(%q) failed: %v", socks5Addr, err)
-				}
-			} else {
-				log.Fatalf("found unknown transport protocol %s in server config", protocol.String())
-			}
-			initProxyTasks.Done()
-			log.Infof("mieru server daemon socks5 server %q is running", socks5Addr)
-			if err = socks5Server.Serve(l); err != nil {
-				log.Fatalf("run socks5 server %q failed: %v", socks5Addr, err)
-			}
-			log.Infof("mieru server daemon socks5 server %q is stopped", socks5Addr)
-		}()
-	}
+		log.Infof("mita server daemon socks5 server is stopped")
+	}()
 
 	initProxyTasks.Wait()
 	metrics.EnableLogging()
@@ -161,11 +169,12 @@ func (s *serverLifecycleService) Start(ctx context.Context, req *pb.Empty) (*pb.
 func (s *serverLifecycleService) Stop(ctx context.Context, req *pb.Empty) (*pb.Empty, error) {
 	SetAppStatus(pb.AppStatus_STOPPING)
 	log.Infof("received stop request from RPC caller")
-	if !GetSocks5ServerGroup().IsEmpty() {
-		log.Infof("stopping socks5 server(s)")
-		if err := GetSocks5ServerGroup().CloseAndRemoveAll(); err != nil {
+	if socks5ServerRef.Load() != nil {
+		log.Infof("stopping socks5 server")
+		if err := socks5ServerRef.Load().Close(); err != nil {
 			log.Infof("socks5 server Close() failed: %v", err)
 		}
+		SetSocks5Server(nil)
 	} else {
 		log.Infof("active socks5 servers not found")
 	}
@@ -174,14 +183,51 @@ func (s *serverLifecycleService) Stop(ctx context.Context, req *pb.Empty) (*pb.E
 	return &pb.Empty{}, nil
 }
 
+func (s *serverLifecycleService) Reload(ctx context.Context, req *pb.Empty) (*pb.Empty, error) {
+	log.Infof("received start request from RPC caller")
+	config, err := LoadServerConfig()
+	if err != nil {
+		return &pb.Empty{}, fmt.Errorf("LoadServerConfig() failed: %w", err)
+	}
+	if err = ValidateFullServerConfig(config); err != nil {
+		return &pb.Empty{}, fmt.Errorf("ValidateFullServerConfig() failed: %w", err)
+	}
+
+	// Adjust loggingLevel.
+	// This needs to happen before adjusting other settings.
+	loggingLevel := config.GetLoggingLevel().String()
+	if loggingLevel != pb.LoggingLevel_DEFAULT.String() {
+		log.SetLevel(loggingLevel)
+	}
+
+	mux := serverMuxRef.Load()
+	if mux != nil {
+		// Adjust portBindings.
+		mtu := common.DefaultMTU
+		if config.GetMtu() != 0 {
+			mtu = int(config.GetMtu())
+		}
+		endpoints, err := PortBindingsToUnderlayProperties(config.GetPortBindings(), mtu)
+		if err != nil {
+			return &pb.Empty{}, err
+		}
+		mux.SetEndpoints(endpoints)
+
+		// Adjust users.
+		mux.SetServerUsers(UserListToMap(config.GetUsers()))
+	}
+	return &pb.Empty{}, nil
+}
+
 func (s *serverLifecycleService) Exit(ctx context.Context, req *pb.Empty) (*pb.Empty, error) {
 	SetAppStatus(pb.AppStatus_STOPPING)
 	log.Infof("received exit request from RPC caller")
-	if !GetSocks5ServerGroup().IsEmpty() {
-		log.Infof("stopping socks5 server(s)")
-		if err := GetSocks5ServerGroup().CloseAndRemoveAll(); err != nil {
+	if socks5ServerRef.Load() != nil {
+		log.Infof("stopping socks5 server")
+		if err := socks5ServerRef.Load().Close(); err != nil {
 			log.Infof("socks5 server Close() failed: %v", err)
 		}
+		SetSocks5Server(nil)
 	} else {
 		log.Infof("active socks5 servers not found")
 	}
@@ -198,23 +244,43 @@ func (s *serverLifecycleService) Exit(ctx context.Context, req *pb.Empty) (*pb.E
 	return &pb.Empty{}, nil
 }
 
+func (s *serverLifecycleService) GetMetrics(ctx context.Context, req *pb.Empty) (*pb.Metrics, error) {
+	b, err := metrics.GetMetricsAsJSON()
+	if err != nil {
+		return &pb.Metrics{}, err
+	}
+	return &pb.Metrics{Json: proto.String(string(b))}, nil
+}
+
+func (s *serverLifecycleService) GetSessionInfo(context.Context, *pb.Empty) (*pb.SessionInfo, error) {
+	mux := serverMuxRef.Load()
+	if mux == nil {
+		return &pb.SessionInfo{}, fmt.Errorf("server multiplexier is unavailable")
+	}
+	return &pb.SessionInfo{Table: mux.ExportSessionInfoTable()}, nil
+}
+
 func (s *serverLifecycleService) GetThreadDump(ctx context.Context, req *pb.Empty) (*pb.ThreadDump, error) {
-	return &pb.ThreadDump{ThreadDump: proto.String(string(getThreadDump()))}, nil
+	return &pb.ThreadDump{ThreadDump: proto.String(common.GetAllStackTrace())}, nil
 }
 
 func (s *serverLifecycleService) StartCPUProfile(ctx context.Context, req *pb.ProfileSavePath) (*pb.Empty, error) {
-	err := startCPUProfile(req.GetFilePath())
+	err := common.StartCPUProfile(req.GetFilePath())
 	return &pb.Empty{}, err
 }
 
 func (s *serverLifecycleService) StopCPUProfile(ctx context.Context, req *pb.Empty) (*pb.Empty, error) {
-	stopCPUProfile()
+	common.StopCPUProfile()
 	return &pb.Empty{}, nil
 }
 
 func (s *serverLifecycleService) GetHeapProfile(ctx context.Context, req *pb.ProfileSavePath) (*pb.Empty, error) {
-	err := getHeapProfile(req.GetFilePath())
+	err := common.GetHeapProfile(req.GetFilePath())
 	return &pb.Empty{}, err
+}
+
+func (s *serverLifecycleService) GetMemoryStatistics(ctx context.Context, req *pb.Empty) (*pb.MemoryStatistics, error) {
+	return &pb.MemoryStatistics{Json: proto.String(common.GetMemoryStats())}, nil
 }
 
 // NewServerLifecycleService creates a new ServerLifecycleService RPC server.
@@ -223,20 +289,18 @@ func NewServerLifecycleService() *serverLifecycleService {
 }
 
 // NewServerLifecycleRPCClient creates a new ServerLifecycleService RPC client.
-func NewServerLifecycleRPCClient() (pb.ServerLifecycleServiceClient, error) {
-	rpcAddr := "unix://" + ServerUDS
-	timedctx, cancelFunc := context.WithTimeout(context.Background(), RPCTimeout)
-	defer cancelFunc()
-	conn, err := grpc.DialContext(timedctx, rpcAddr, grpc.WithInsecure())
+func NewServerLifecycleRPCClient() (appctlgrpc.ServerLifecycleServiceClient, error) {
+	rpcAddr := "unix://" + ServerUDS()
+	conn, err := grpc.NewClient(rpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(MaxRecvMsgSize)))
 	if err != nil {
-		return nil, fmt.Errorf("grpc.DialContext() failed: %w", err)
+		return nil, fmt.Errorf("grpc.NewClient() failed: %w", err)
 	}
-	return pb.NewServerLifecycleServiceClient(conn), nil
+	return appctlgrpc.NewServerLifecycleServiceClient(conn), nil
 }
 
 // serverConfigService implements ServerConfigService defined in servercfg.proto.
 type serverConfigService struct {
-	pb.UnimplementedServerConfigServiceServer
+	appctlgrpc.UnimplementedServerConfigServiceServer
 }
 
 func (s *serverConfigService) GetConfig(ctx context.Context, req *pb.Empty) (*pb.ServerConfig, error) {
@@ -264,15 +328,13 @@ func NewServerConfigService() *serverConfigService {
 }
 
 // NewServerConfigRPCClient creates a new ServerConfigService RPC client.
-func NewServerConfigRPCClient() (pb.ServerConfigServiceClient, error) {
-	rpcAddr := "unix://" + ServerUDS
-	timedctx, cancelFunc := context.WithTimeout(context.Background(), RPCTimeout)
-	defer cancelFunc()
-	conn, err := grpc.DialContext(timedctx, rpcAddr, grpc.WithInsecure())
+func NewServerConfigRPCClient() (appctlgrpc.ServerConfigServiceClient, error) {
+	rpcAddr := "unix://" + ServerUDS()
+	conn, err := grpc.NewClient(rpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(MaxRecvMsgSize)))
 	if err != nil {
-		return nil, fmt.Errorf("grpc.DialContext() failed: %w", err)
+		return nil, fmt.Errorf("grpc.NewClient() failed: %w", err)
 	}
-	return pb.NewServerConfigServiceClient(conn), nil
+	return appctlgrpc.NewServerConfigServiceClient(conn), nil
 }
 
 // GetServerStatusWithRPC gets server application status via ServerLifecycleService.GetStatus() RPC.
@@ -296,7 +358,7 @@ func IsServerDaemonRunning(appStatus *pb.AppStatusMsg) error {
 		return fmt.Errorf("AppStatusMsg is nil")
 	}
 	if appStatus.GetStatus() == pb.AppStatus_UNKNOWN {
-		return fmt.Errorf("mieru server status is %q", appStatus.GetStatus().String())
+		return fmt.Errorf("mita server status is %q", appStatus.GetStatus().String())
 	}
 	return nil
 }
@@ -307,7 +369,7 @@ func IsServerProxyRunning(appStatus *pb.AppStatusMsg) error {
 		return err
 	}
 	if appStatus.GetStatus() != pb.AppStatus_RUNNING {
-		return fmt.Errorf("mieru server status is %q", appStatus.GetStatus().String())
+		return fmt.Errorf("mita server status is %q", appStatus.GetStatus().String())
 	}
 	return nil
 }
@@ -318,9 +380,9 @@ func GetJSONServerConfig() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("LoadServerConfig() failed: %w", err)
 	}
-	b, err := jsonMarshalOption.Marshal(config)
+	b, err := common.MarshalJSON(config)
 	if err != nil {
-		return "", fmt.Errorf("protojson.Marshal() failed: %w", err)
+		return "", fmt.Errorf("common.MarshalJSON() failed: %w", err)
 	}
 	return string(b), nil
 }
@@ -359,8 +421,8 @@ func LoadServerConfig() (*pb.ServerConfig, error) {
 			return nil, fmt.Errorf("proto.Unmarshal() failed: %w", err)
 		}
 	case JSON_CONFIG_FILE_TYPE:
-		if err := Unmarshal(b, s); err != nil {
-			return nil, fmt.Errorf("Unmarshal() failed: %w", err)
+		if err := common.UnmarshalJSON(b, s); err != nil {
+			return nil, fmt.Errorf("common.UnmarshalJSON() failed: %w", err)
 		}
 	default:
 		return nil, fmt.Errorf("config file type is invalid")
@@ -394,8 +456,8 @@ func StoreServerConfig(config *pb.ServerConfig) error {
 			return fmt.Errorf("proto.Marshal() failed: %w", err)
 		}
 	case JSON_CONFIG_FILE_TYPE:
-		if b, err = Marshal(config); err != nil {
-			return fmt.Errorf("Marshal() failed: %w", err)
+		if b, err = common.MarshalJSON(config); err != nil {
+			return fmt.Errorf("common.MarshalJSON() failed: %w", err)
 		}
 	default:
 		return fmt.Errorf("config file type is invalid")
@@ -415,8 +477,8 @@ func ApplyJSONServerConfig(path string) error {
 		return fmt.Errorf("os.ReadFile(%q) failed: %w", path, err)
 	}
 	s := &pb.ServerConfig{}
-	if err = jsonUnmarshalOption.Unmarshal(b, s); err != nil {
-		return fmt.Errorf("protojson.Unmarshal() failed: %w", err)
+	if err = common.UnmarshalJSON(b, s); err != nil {
+		return fmt.Errorf("common.UnmarshalJSON() failed: %w", err)
 	}
 	if err := ValidateServerConfigPatch(s); err != nil {
 		return fmt.Errorf("ValidateServerConfigPatch() failed: %w", err)
@@ -470,23 +532,29 @@ func DeleteServerUsers(names []string) error {
 // ValidateServerConfigPatch validates a patch of server config.
 //
 // A server config patch must satisfy:
-// 1. for each port binding
-// 1.1. port number is valid
-// 1.2. protocol is valid
+// 1. port bindings are valid
 // 2. for each user
 // 2.1. user name is not empty
 // 2.2. user has either a password or a hashed password
+// 2.3. for each quota
+// 2.3.1. number of days is valid
+// 2.3.2. traffic volume in megabyte is valid
 // 3. if set, MTU is valid
+// 4. for each egress proxy
+// 4.1. name is not empty
+// 4.2. name is unique
+// 4.3. protocol is valid
+// 4.4. host is not empty
+// 4.5. port is valid
+// 4.6. if socks5 authentication is used, the user and password are not empty
+// 5. there is maximum 1 egress rule
+// 5.1. the IP ranges must be "*"
+// 5.2. the domain names must be "*"
+// 5.3. the action must be "PROXY"
+// 5.4. the proxy name is defined
 func ValidateServerConfigPatch(patch *pb.ServerConfig) error {
-	for _, portBinding := range patch.GetPortBindings() {
-		port := portBinding.GetPort()
-		protocol := portBinding.GetProtocol()
-		if port < 1 || port > 65535 {
-			return fmt.Errorf("port number %d is invalid", port)
-		}
-		if protocol == pb.TransportProtocol_UNKNOWN_TRANSPORT_PROTOCOL {
-			return fmt.Errorf("protocol is not set")
-		}
+	if _, err := appctlcommon.FlatPortBindings(patch.GetPortBindings()); err != nil {
+		return err
 	}
 	for _, user := range patch.GetUsers() {
 		if user.GetName() == "" {
@@ -495,9 +563,72 @@ func ValidateServerConfigPatch(patch *pb.ServerConfig) error {
 		if user.GetPassword() == "" && user.GetHashedPassword() == "" {
 			return fmt.Errorf("user password is not set")
 		}
+		for _, quota := range user.GetQuotas() {
+			if quota.GetDays() <= 0 {
+				return fmt.Errorf("quota: number of days %d is invalid", quota.GetDays())
+			}
+			if quota.GetMegabytes() <= 0 {
+				return fmt.Errorf("quota: traffic volume in megabyte %d is invalid", quota.GetMegabytes())
+			}
+		}
 	}
 	if patch.GetMtu() != 0 && (patch.GetMtu() < 1280 || patch.GetMtu() > 1500) {
 		return fmt.Errorf("MTU value %d is out of range, valid range is [1280, 1500]", patch.GetMtu())
+	}
+	usedProxyNames := map[string]bool{}
+	for _, proxy := range patch.GetEgress().GetProxies() {
+		if proxy.GetName() == "" {
+			return fmt.Errorf("egress proxy name is empty")
+		}
+		if _, found := usedProxyNames[proxy.GetName()]; found {
+			return fmt.Errorf("found duplicate egress proxy name %q", proxy.GetName())
+		}
+		usedProxyNames[proxy.GetName()] = true
+		if proxy.GetProtocol() == pb.ProxyProtocol_UNKNOWN_PROXY_PROTOCOL {
+			return fmt.Errorf("egress proxy protocol is not set")
+		}
+		if proxy.GetHost() == "" {
+			return fmt.Errorf("egress proxy host is not set")
+		}
+		if proxy.GetPort() < 1 || proxy.GetPort() > 65535 {
+			return fmt.Errorf("egress proxy port number %d is invalid", proxy.GetPort())
+		}
+		hasSocks5AuthenticationUser := proxy.GetSocks5Authentication().GetUser() != ""
+		hasSocks5AuthenticationPassword := proxy.GetSocks5Authentication().GetPassword() != ""
+		if !hasSocks5AuthenticationUser && hasSocks5AuthenticationPassword {
+			return fmt.Errorf("egress proxy socks5 authentication user is not set")
+		}
+		if hasSocks5AuthenticationUser && !hasSocks5AuthenticationPassword {
+			return fmt.Errorf("egress proxy socks5 authentication password is not set")
+		}
+	}
+	if len(patch.GetEgress().GetRules()) > 1 {
+		return fmt.Errorf("found %d egress rules, maximum number of supported rules is 1", len(patch.GetEgress().GetRules()))
+	}
+	if len(patch.GetEgress().GetRules()) == 1 {
+		rule := patch.GetEgress().GetRules()[0]
+		if len(rule.GetIpRanges()) != 1 || rule.GetIpRanges()[0] != "*" {
+			return fmt.Errorf("egress rule: the only supported IP range value is %q", "*")
+		}
+		if len(rule.GetDomainNames()) != 1 || rule.GetDomainNames()[0] != "*" {
+			return fmt.Errorf("egress rule: the only supported domain name value is %q", "*")
+		}
+		if rule.GetAction() != pb.EgressAction_PROXY {
+			return fmt.Errorf("egress rule: the only supported action is %q", pb.EgressAction_PROXY.String())
+		}
+		if rule.GetProxyName() == "" {
+			return fmt.Errorf("egress rule: proxy name is not set")
+		}
+		foundProxy := false
+		for _, proxy := range patch.GetEgress().GetProxies() {
+			if proxy.GetName() == rule.GetProxyName() {
+				foundProxy = true
+				break
+			}
+		}
+		if !foundProxy {
+			return fmt.Errorf("egress rule: proxy %q is not defined", rule.GetProxyName())
+		}
 	}
 	return nil
 }
@@ -507,7 +638,7 @@ func ValidateServerConfigPatch(patch *pb.ServerConfig) error {
 // In addition to ValidateServerConfigPatch, it also validates:
 // 1. there is at least 1 port binding
 //
-// It is not an error if no user is configured. However mieru won't be functional.
+// It is not an error if no user is configured. However mita won't be functional.
 func ValidateFullServerConfig(config *pb.ServerConfig) error {
 	if err := ValidateServerConfigPatch(config); err != nil {
 		return err
@@ -519,6 +650,35 @@ func ValidateFullServerConfig(config *pb.ServerConfig) error {
 		return fmt.Errorf("server port binding is not set")
 	}
 	return nil
+}
+
+// PortBindingsToUnderlayProperties converts port bindings to underlay properties.
+func PortBindingsToUnderlayProperties(portBindings []*pb.PortBinding, mtu int) ([]protocol.UnderlayProperties, error) {
+	endpoints := make([]protocol.UnderlayProperties, 0)
+	listenIP := net.ParseIP(common.AllIPAddr())
+	if listenIP == nil {
+		return endpoints, fmt.Errorf(stderror.ParseIPFailed)
+	}
+	portBindings, err := appctlcommon.FlatPortBindings(portBindings)
+	if err != nil {
+		return endpoints, fmt.Errorf(stderror.InvalidPortBindingsErr, err)
+	}
+	n := len(portBindings)
+	for i := 0; i < n; i++ {
+		proto := portBindings[i].GetProtocol()
+		port := portBindings[i].GetPort()
+		switch proto {
+		case pb.TransportProtocol_TCP:
+			endpoint := protocol.NewUnderlayProperties(mtu, common.StreamTransport, &net.TCPAddr{IP: listenIP, Port: int(port)}, nil)
+			endpoints = append(endpoints, endpoint)
+		case pb.TransportProtocol_UDP:
+			endpoint := protocol.NewUnderlayProperties(mtu, common.PacketTransport, &net.UDPAddr{IP: listenIP, Port: int(port)}, nil)
+			endpoints = append(endpoints, endpoint)
+		default:
+			return []protocol.UnderlayProperties{}, fmt.Errorf(stderror.InvalidTransportProtocol)
+		}
+	}
+	return endpoints, nil
 }
 
 // checkServerConfigDir validates if server config directory exists.
@@ -550,12 +710,12 @@ func serverConfigFilePath() (string, ConfigFileType, error) {
 // mergeServerConfig merges the source client config into destination.
 // If a user is specified in source, it is added to destination, or replacing existing user in destination.
 func mergeServerConfig(dst, src *pb.ServerConfig) error {
-	// Port bindings: if src is not empty, replace dst with src.
-	var mergedPortBindings []*pb.PortBinding
-	if len(src.GetPortBindings()) != 0 {
-		mergedPortBindings = src.GetPortBindings()
+	// Port bindings: if src is set, replace dst with src.
+	var portBindings []*pb.PortBinding
+	if src.PortBindings != nil {
+		portBindings = src.GetPortBindings()
 	} else {
-		mergedPortBindings = dst.GetPortBindings()
+		portBindings = dst.GetPortBindings()
 	}
 
 	// Users: merge src into dst.
@@ -594,13 +754,27 @@ func mergeServerConfig(dst, src *pb.ServerConfig) error {
 	} else {
 		mtu = dst.GetMtu()
 	}
+	var egress *pb.Egress
+	if src.Egress != nil {
+		egress = src.GetEgress()
+	} else {
+		egress = dst.GetEgress()
+	}
+	var dns *pb.DNS
+	if src.Dns != nil {
+		dns = src.GetDns()
+	} else {
+		dns = dst.GetDns()
+	}
 
 	proto.Reset(dst)
-	dst.PortBindings = mergedPortBindings
+	dst.PortBindings = portBindings
 	dst.Users = mergedUsers
 	dst.AdvancedSettings = advancedSettings
 	dst.LoggingLevel = &loggingLevel
 	dst.Mtu = proto.Int32(mtu)
+	dst.Egress = egress
+	dst.Dns = dns
 	return nil
 }
 

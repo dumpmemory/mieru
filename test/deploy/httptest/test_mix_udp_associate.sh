@@ -21,6 +21,13 @@
 # Load test library.
 source ./libtest.sh
 
+echo "mita build info:"
+./mita describe build
+sleep 1
+echo "mieru build info:"
+./mieru describe build
+sleep 1
+
 # Update mieru server with mixed config.
 ./mita apply config server_mix.json
 if [[ "$?" -ne 0 ]]; then
@@ -43,14 +50,26 @@ if [[ "$?" -ne 0 ]]; then
     echo "command 'mieru apply config client_mix.json' failed"
     exit 1
 fi
+sleep 1
+./mieru delete http proxy
+sleep 1
+./mieru delete socks5 authentication
+sleep 1
+./mieru export config simple
+sleep 1
 ./mieru export config > client.url.txt
 rm ~/.config/mieru/client.conf.pb
+sleep 1
 echo "mieru client config before import:"
 ./mieru describe config
+sleep 1
+echo "mieru client config URL:"
+cat client.url.txt
 sleep 1
 ./mieru import config $(cat client.url.txt)
 echo "mieru client config after import:"
 ./mieru describe config
+sleep 1
 
 # Start mieru client.
 ./mieru start
@@ -75,6 +94,12 @@ fi
 # Collect profile with UDP associate.
 ./mieru get heap-profile /test/mieru.associate.heap.gz
 ./mita get heap-profile /test/mita.associate.heap.gz
+
+# Print metrics and memory statistics.
+print_mieru_client_metrics
+sleep 1
+print_mieru_server_metrics
+sleep 1
 
 # Stop mieru client.
 ./mieru stop

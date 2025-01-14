@@ -17,21 +17,34 @@ package testtool
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	mrand "math/rand"
+	"net"
+	"runtime"
+	"sync"
+	"time"
+
+	"github.com/enfein/mieru/v3/pkg/common"
 )
 
 // BufPipe is like net.Pipe() but with an internal buffer.
-func BufPipe() (io.ReadWriteCloser, io.ReadWriteCloser) {
+func BufPipe() (net.Conn, net.Conn) {
 	var buf1, buf2 bytes.Buffer
+	var lock1, lock2 sync.Mutex
 	ep1 := &ioEndpoint{
 		direction: forward,
 		buf1:      &buf1,
 		buf2:      &buf2,
+		lock1:     &lock1,
+		lock2:     &lock2,
 	}
 	ep2 := &ioEndpoint{
 		direction: backward,
 		buf1:      &buf1,
 		buf2:      &buf2,
+		lock1:     &lock1,
+		lock2:     &lock2,
 	}
 	return ep1, ep2
 }
@@ -47,22 +60,77 @@ type ioEndpoint struct {
 	direction ioDirection
 	buf1      *bytes.Buffer // forward writes to here
 	buf2      *bytes.Buffer // backward writes to here
+	lock1     *sync.Mutex   // lock of buf1
+	lock2     *sync.Mutex   // lock of buf2
+	closed    bool
 }
 
-func (e *ioEndpoint) Read(b []byte) (int, error) {
-	if e.direction == forward {
-		return e.buf2.Read(b)
+var _ net.Conn = &ioEndpoint{}
+
+func (e *ioEndpoint) Read(b []byte) (n int, err error) {
+	if e.closed {
+		return 0, io.EOF
 	}
-	return e.buf1.Read(b)
+	if e.direction == forward {
+		e.lock2.Lock()
+		n, err = e.buf2.Read(b)
+		e.lock2.Unlock()
+	} else {
+		e.lock1.Lock()
+		n, err = e.buf1.Read(b)
+		e.lock1.Unlock()
+	}
+	if errors.Is(err, io.EOF) {
+		// io.ReadFull() with partial result will not fail.
+		err = nil
+		action := mrand.Intn(2)
+		if action == 0 {
+			// Allow the writer to catch up.
+			runtime.Gosched()
+		} else {
+			time.Sleep(time.Microsecond)
+		}
+	}
+	return
 }
 
-func (e *ioEndpoint) Write(b []byte) (int, error) {
-	if e.direction == forward {
-		return e.buf1.Write(b)
+func (e *ioEndpoint) Write(b []byte) (n int, err error) {
+	if e.closed {
+		return 0, io.ErrClosedPipe
 	}
-	return e.buf2.Write(b)
+	if e.direction == forward {
+		e.lock1.Lock()
+		n, err = e.buf1.Write(b)
+		e.lock1.Unlock()
+	} else {
+		e.lock2.Lock()
+		n, err = e.buf2.Write(b)
+		e.lock2.Unlock()
+	}
+	return
 }
 
 func (e *ioEndpoint) Close() error {
+	e.closed = true
+	return nil
+}
+
+func (e *ioEndpoint) LocalAddr() net.Addr {
+	return common.NilNetAddr()
+}
+
+func (e *ioEndpoint) RemoteAddr() net.Addr {
+	return common.NilNetAddr()
+}
+
+func (e *ioEndpoint) SetDeadline(t time.Time) error {
+	return nil
+}
+
+func (e *ioEndpoint) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+func (e *ioEndpoint) SetWriteDeadline(t time.Time) error {
 	return nil
 }

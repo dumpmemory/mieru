@@ -2,15 +2,15 @@
     "portBindings": [
         {
             "port": 9000,
+            "protocol": "TCP"
+        },
+        {
+            "portRange": "10000-11000",
             "protocol": "UDP"
         },
         {
-            "port": 10000,
-            "protocol": "UDP"
-        },
-        {
-            "port": 11000,
-            "protocol": "UDP"
+            "portRange": "12000-13000",
+            "protocol": "TCP"
         }
     ],
     "users": [
@@ -20,9 +20,40 @@
         },
         {
             "name": "user2",
-            "password": "c30ce98ebe45"
+            "password": "c30ce98ebe45",
+            "quotas": [
+                {
+                    "days": 7,
+                    "megabytes": 1000
+                },
+                {
+                    "days": 30,
+                    "megabytes": 2000
+                }
+            ]
         }
     ],
     "loggingLevel": "INFO",
-    "mtu": 1400
+    "mtu": 1400,
+    "egress": {
+        "proxies": [
+            {
+                "name": "warp",
+                "protocol": "SOCKS5_PROXY_PROTOCOL",
+                "host": "localhost",
+                "port": 1080
+            }
+        ],
+        "rules": [
+            {
+                "ipRanges": ["*"],
+                "domainNames": ["*"],
+                "action": "PROXY",
+                "proxyName": "warp"
+            }
+        ]
+    },
+    "dns": {
+        "dualStack": "PREFER_IPv4"
+    }
 }

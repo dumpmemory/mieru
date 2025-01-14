@@ -9,7 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/enfein/mieru/pkg/util"
+	"github.com/enfein/mieru/v3/apis/constant"
+	"github.com/enfein/mieru/v3/pkg/common"
 )
 
 func TestSocks5Connect(t *testing.T) {
@@ -53,9 +54,9 @@ func TestSocks5Connect(t *testing.T) {
 	}
 
 	// Socks server start listening.
-	serverPort, err := util.UnusedTCPPort()
+	serverPort, err := common.UnusedTCPPort()
 	if err != nil {
-		t.Fatalf("util.UnusedTCPPort() failed: %v", err)
+		t.Fatalf("common.UnusedTCPPort() failed: %v", err)
 	}
 	go func() {
 		if err := serv.ListenAndServe("tcp", "127.0.0.1:"+strconv.Itoa(serverPort)); err != nil {
@@ -72,9 +73,8 @@ func TestSocks5Connect(t *testing.T) {
 	}
 
 	req := bytes.NewBuffer(nil)
-	req.Write([]byte{5})
-	req.Write([]byte{1, noAuth})
-	req.Write([]byte{5, 1, 0, 1, 127, 0, 0, 1})
+	req.Write([]byte{constant.Socks5Version, 1, constant.Socks5NoAuth})
+	req.Write([]byte{constant.Socks5Version, constant.Socks5ConnectCmd, 0, constant.Socks5IPv4Address, 127, 0, 0, 1})
 	port := []byte{0, 0}
 	binary.BigEndian.PutUint16(port, uint16(lAddr.Port))
 	req.Write(port)
@@ -87,8 +87,8 @@ func TestSocks5Connect(t *testing.T) {
 
 	// Verify response from socks server.
 	want := []byte{
-		socks5Version, noAuth,
-		socks5Version, 0, 0, 1,
+		constant.Socks5Version, constant.Socks5NoAuth,
+		constant.Socks5Version, 0, 0, constant.Socks5IPv4Address,
 		127, 0, 0, 1,
 		0, 0,
 		'p', 'o', 'n', 'g',
@@ -109,8 +109,8 @@ func TestSocks5Connect(t *testing.T) {
 }
 
 func TestSocks5UDPAssociation(t *testing.T) {
-	udpInPktsCnt := UDPAssociateInPkts.Load()
-	udpOutPktsCnt := UDPAssociateOutPkts.Load()
+	udpUploadPktsCnt := UDPAssociateUploadPackets.Load()
+	udpDownloadPktsCnt := UDPAssociateDownloadPackets.Load()
 
 	// Create a local listener as the destination target.
 	udpListenerAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
@@ -162,9 +162,9 @@ func TestSocks5UDPAssociation(t *testing.T) {
 	}
 
 	// Socks server start listening.
-	serverPort, err := util.UnusedTCPPort()
+	serverPort, err := common.UnusedTCPPort()
 	if err != nil {
-		t.Fatalf("util.UnusedTCPPort() failed: %v", err)
+		t.Fatalf("common.UnusedTCPPort() failed: %v", err)
 	}
 	go func() {
 		if err := serv.ListenAndServe("tcp", "127.0.0.1:"+strconv.Itoa(serverPort)); err != nil {
@@ -181,9 +181,8 @@ func TestSocks5UDPAssociation(t *testing.T) {
 	}
 
 	req := bytes.NewBuffer(nil)
-	req.Write([]byte{5})
-	req.Write([]byte{1, noAuth})
-	req.Write([]byte{5, 3, 0, 1, 127, 0, 0, 1, 0, 0})
+	req.Write([]byte{constant.Socks5Version, 1, constant.Socks5NoAuth})
+	req.Write([]byte{constant.Socks5Version, constant.Socks5UDPAssociateCmd, 0, constant.Socks5IPv4Address, 127, 0, 0, 1, 0, 0})
 
 	// Send initial UDP association request.
 	if _, err := conn.Write(req.Bytes()); err != nil {
@@ -192,8 +191,8 @@ func TestSocks5UDPAssociation(t *testing.T) {
 
 	// Verify response from socks server.
 	want := []byte{
-		socks5Version, noAuth,
-		socks5Version, 0, 0, 1,
+		constant.Socks5Version, constant.Socks5NoAuth,
+		constant.Socks5Version, 0, 0, constant.Socks5IPv4Address,
 		0, 0, 0, 0,
 		0, 0,
 	}
@@ -235,35 +234,10 @@ func TestSocks5UDPAssociation(t *testing.T) {
 	}
 
 	// Verify metrics are updated.
-	if UDPAssociateInPkts.Load() <= udpInPktsCnt {
-		t.Errorf("UDPAssociateInPkts value %d is not increased", UDPAssociateInPkts.Load())
+	if UDPAssociateUploadPackets.Load() <= udpUploadPktsCnt {
+		t.Errorf("UDPAssociateUploadPackets value %d is not increased", UDPAssociateUploadPackets.Load())
 	}
-	if UDPAssociateOutPkts.Load() <= udpOutPktsCnt {
-		t.Errorf("UDPAssociateOutPkts value %d is not increased", UDPAssociateOutPkts.Load())
-	}
-}
-
-func TestServerGroup(t *testing.T) {
-	c := &Config{}
-	s1, err := New(c)
-	if err != nil {
-		t.Fatalf("New() failed: %v", err)
-	}
-	g := NewGroup()
-	port, err := util.UnusedUDPPort()
-	if err != nil {
-		t.Fatalf("util.UnusedUDPPort() failed: %v", err)
-	}
-	if err := g.Add("UDP", port, s1); err != nil {
-		t.Fatalf("Add() failed: %v", err)
-	}
-	if g.IsEmpty() {
-		t.Errorf("IsEmpty() = %v, want %v", true, false)
-	}
-	if err := g.CloseAndRemoveAll(); err != nil {
-		t.Fatalf("CloseAndRemoveAll() failed: %v", err)
-	}
-	if !g.IsEmpty() {
-		t.Errorf("After CloseAndRemoveAll(), IsEmpty() = %v, want %v", false, true)
+	if UDPAssociateDownloadPackets.Load() <= udpDownloadPktsCnt {
+		t.Errorf("UDPAssociateDownloadPackets value %d is not increased", UDPAssociateDownloadPackets.Load())
 	}
 }

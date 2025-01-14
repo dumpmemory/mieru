@@ -17,10 +17,29 @@ package cipher
 
 import (
 	"bytes"
+	crand "crypto/rand"
 	"fmt"
 	"testing"
 	"time"
 )
+
+func BenchmarkNewKey(b *testing.B) {
+	password := make([]byte, 32)
+	if _, err := crand.Read(password); err != nil {
+		b.Fatalf("Generate password failed.")
+	}
+	t := time.Now()
+	salts := saltFromTime(t)
+	keygen := pbkdf2Gen{
+		Salt: salts[1],
+		Iter: KeyIter,
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		keygen.NewKey(password, DefaultKeyLen)
+	}
+}
 
 func TestSaltFromTimeSize(t *testing.T) {
 	salts := saltFromTime(time.Now())
@@ -42,7 +61,7 @@ func hasOverlap(a, b [][]byte) bool {
 
 func TestSaltFromTimeCoverage(t *testing.T) {
 	noOverlap := 0
-	nTest := 30
+	nTest := 10
 
 	for i := 1; i <= nTest; i++ {
 		forward, err := time.ParseDuration(fmt.Sprintf("%dm", i))

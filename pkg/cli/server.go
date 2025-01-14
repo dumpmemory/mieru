@@ -26,19 +26,22 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
-	"github.com/enfein/mieru/pkg/appctl"
-	"github.com/enfein/mieru/pkg/appctl/appctlpb"
-	"github.com/enfein/mieru/pkg/cipher"
-	"github.com/enfein/mieru/pkg/http2socks"
-	"github.com/enfein/mieru/pkg/log"
-	"github.com/enfein/mieru/pkg/metrics"
-	"github.com/enfein/mieru/pkg/socks5"
-	"github.com/enfein/mieru/pkg/stderror"
-	"github.com/enfein/mieru/pkg/tcpsession"
-	"github.com/enfein/mieru/pkg/udpsession"
-	"github.com/enfein/mieru/pkg/util"
+	"github.com/enfein/mieru/v3/pkg/appctl"
+	"github.com/enfein/mieru/v3/pkg/appctl/appctlgrpc"
+	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
+	"github.com/enfein/mieru/v3/pkg/cipher"
+	"github.com/enfein/mieru/v3/pkg/common"
+	"github.com/enfein/mieru/v3/pkg/egress"
+	"github.com/enfein/mieru/v3/pkg/log"
+	"github.com/enfein/mieru/v3/pkg/metrics"
+	"github.com/enfein/mieru/v3/pkg/protocol"
+	"github.com/enfein/mieru/v3/pkg/socks5"
+	"github.com/enfein/mieru/v3/pkg/stderror"
+	"github.com/enfein/mieru/v3/pkg/version/updater"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -72,6 +75,13 @@ func RegisterServerCommands() {
 			return unexpectedArgsError(s, 2)
 		},
 		serverStopFunc,
+	)
+	RegisterCallback(
+		[]string{"", "reload"},
+		func(s []string) error {
+			return unexpectedArgsError(s, 2)
+		},
+		serverReloadFunc,
 	)
 	RegisterCallback(
 		[]string{"", "status"},
@@ -117,11 +127,32 @@ func RegisterServerCommands() {
 		versionFunc,
 	)
 	RegisterCallback(
+		[]string{"", "describe", "build"},
+		func(s []string) error {
+			return unexpectedArgsError(s, 3)
+		},
+		describeBuildFunc,
+	)
+	RegisterCallback(
 		[]string{"", "check", "update"},
 		func(s []string) error {
 			return unexpectedArgsError(s, 3)
 		},
-		checkUpdateFunc,
+		serverCheckUpdateFunc,
+	)
+	RegisterCallback(
+		[]string{"", "get", "metrics"},
+		func(s []string) error {
+			return unexpectedArgsError(s, 3)
+		},
+		serverGetMetricsFunc,
+	)
+	RegisterCallback(
+		[]string{"", "get", "connections"},
+		func(s []string) error {
+			return unexpectedArgsError(s, 3)
+		},
+		serverGetConnectionsFunc,
 	)
 	RegisterCallback(
 		[]string{"", "get", "thread-dump"},
@@ -141,6 +172,13 @@ func RegisterServerCommands() {
 			return nil
 		},
 		serverGetHeapProfileFunc,
+	)
+	RegisterCallback(
+		[]string{"", "get", "memory-statistics"},
+		func(s []string) error {
+			return unexpectedArgsError(s, 3)
+		},
+		serverGetMemoryStatisticsFunc,
 	)
 	RegisterCallback(
 		[]string{"", "profile", "cpu", "start"},
@@ -164,41 +202,112 @@ func RegisterServerCommands() {
 }
 
 var serverHelpFunc = func(s []string) error {
-	format := "  %-32v%-46v"
-	helpCmd := fmt.Sprintf(format, "help", "Show mieru server help")
-	startCmd := fmt.Sprintf(format, "start", "Start mieru server")
-	stopCmd := fmt.Sprintf(format, "stop", "Stop mieru server")
-	statusCmd := fmt.Sprintf(format, "status", "Check mieru server status")
-	applyConfigCmd := fmt.Sprintf(format, "apply config <FILE>", "Apply server configuration from JSON file")
-	describeConfigCmd := fmt.Sprintf(format, "describe config", "Show current server configuration")
-	deleteUserCmd := fmt.Sprintf(format, "delete user <USER_NAME>", "Delete users from server configuration")
-	versionCmd := fmt.Sprintf(format, "version", "Show mieru server version")
-	checkUpdateCmd := fmt.Sprintf(format, "check update", "Check mieru server update")
-	log.Infof("Usage: %s <COMMAND> [<ARGS>]", binaryName)
-	log.Infof("")
-	log.Infof("Commands:")
-	log.Infof("%s", helpCmd)
-	log.Infof("%s", startCmd)
-	log.Infof("%s", stopCmd)
-	log.Infof("%s", statusCmd)
-	log.Infof("%s", applyConfigCmd)
-	log.Infof("%s", describeConfigCmd)
-	log.Infof("%s", deleteUserCmd)
-	log.Infof("%s", versionCmd)
-	log.Infof("%s", checkUpdateCmd)
+	helpFmt := helpFormatter{
+		appName: "mita",
+		entries: []helpCmdEntry{
+			{
+				cmd:  "help",
+				help: []string{"Show mita server help."},
+			},
+			{
+				cmd:  "start",
+				help: []string{"Start mita server proxy service."},
+			},
+			{
+				cmd:  "stop",
+				help: []string{"Stop mita server proxy service."},
+			},
+			{
+				cmd:  "reload",
+				help: []string{"Reload mita server configuration without stopping proxy service."},
+			},
+			{
+				cmd:  "status",
+				help: []string{"Check mita server proxy service status."},
+			},
+			{
+				cmd: "apply config <JSON_FILE>",
+				help: []string{
+					"Apply server configuration patch from a file.",
+					"It merges the patch with existing server configuration.",
+				},
+			},
+			{
+				cmd:  "describe config",
+				help: []string{"Show current server configuration."},
+			},
+			{
+				cmd:  "delete user <USER_NAME>",
+				help: []string{"Delete a user from server configuration."},
+			},
+			{
+				cmd:  "get metrics",
+				help: []string{"Get mita server metrics."},
+			},
+			{
+				cmd:  "get connections",
+				help: []string{"Get mita server connections."},
+			},
+			{
+				cmd:  "version",
+				help: []string{"Show mita server version."},
+			},
+			{
+				cmd:  "check update",
+				help: []string{"Check mita server update."},
+			},
+		},
+		advanced: []helpCmdEntry{
+			{
+				cmd: "run",
+				help: []string{
+					"Run mita server in foreground.",
+					"Use environment variable MITA_CONFIG_JSON_FILE to load configuration.",
+				},
+			},
+			{
+				cmd:  "describe build",
+				help: []string{"Show mita build info."},
+			},
+			{
+				cmd:  "get thread-dump",
+				help: []string{"Get mita server thread dump."},
+			},
+			{
+				cmd:  "get heap-profile <GZ_FILE>",
+				help: []string{"Get mita server heap profile and save results to the file."},
+			},
+			{
+				cmd:  "get memory-statistics",
+				help: []string{"Get mita server memory statistics."},
+			},
+			{
+				cmd:  "profile cpu start <GZ_FILE>",
+				help: []string{"Start mita server CPU profile and save results to the file."},
+			},
+			{
+				cmd:  "profile cpu stop",
+				help: []string{"Stop mita server CPU profile."},
+			},
+		},
+	}
+	helpFmt.print()
 	return nil
 }
 
 var serverStartFunc = func(s []string) error {
 	appStatus, err := appctl.GetServerStatusWithRPC(context.Background())
 	if err != nil {
+		if stderror.IsConnRefused(err) {
+			return fmt.Errorf(stderror.ServerNotRunningWithCommand)
+		}
 		return fmt.Errorf(stderror.GetServerStatusFailedErr, err)
 	}
 	if err := appctl.IsServerDaemonRunning(appStatus); err != nil {
 		return fmt.Errorf(stderror.ServerNotRunningErr, err)
 	}
 	if err := appctl.IsServerProxyRunning(appStatus); err == nil {
-		log.Infof("mieru server proxy is running")
+		log.Infof("mita server proxy is running")
 		return nil
 	}
 
@@ -213,7 +322,7 @@ var serverStartFunc = func(s []string) error {
 	if err != nil {
 		return fmt.Errorf(stderror.StartServerProxyFailedErr, err)
 	}
-	log.Infof("mieru server proxy is started")
+	log.Infof("mita server proxy is started")
 	return nil
 }
 
@@ -231,7 +340,7 @@ var serverRunFunc = func(s []string) error {
 
 	// Run the RPC server in the background.
 	go func() {
-		rpcAddr := appctl.ServerUDS
+		rpcAddr := appctl.ServerUDS()
 		if err := syscall.Unlink(rpcAddr); err != nil {
 			// Unlink() fails when the file path doesn't exist, which is not a big problem.
 			log.Debugf("syscall.Unlink(%q) failed: %v", rpcAddr, err)
@@ -245,16 +354,17 @@ var serverRunFunc = func(s []string) error {
 				log.Fatalf("update server unix domain socket permission failed: %v", err)
 			}
 		}
-		grpcServer := grpc.NewServer()
+		grpcServer := grpc.NewServer(grpc.MaxRecvMsgSize(appctl.MaxRecvMsgSize))
 		appctl.SetServerRPCServerRef(grpcServer)
-		appctlpb.RegisterServerLifecycleServiceServer(grpcServer, appctl.NewServerLifecycleService())
-		appctlpb.RegisterServerConfigServiceServer(grpcServer, appctl.NewServerConfigService())
+		appctlgrpc.RegisterServerLifecycleServiceServer(grpcServer, appctl.NewServerLifecycleService())
+		appctlgrpc.RegisterServerConfigServiceServer(grpcServer, appctl.NewServerConfigService())
+		reflection.Register(grpcServer)
 		close(appctl.ServerRPCServerStarted)
-		log.Infof("mieru server daemon RPC server is running")
+		log.Infof("mita server daemon RPC server is running")
 		if err = grpcServer.Serve(rpcListener); err != nil {
 			log.Fatalf("run gRPC server failed: %v", err)
 		}
-		log.Infof("mieru server daemon RPC server is stopped")
+		log.Infof("mita server daemon RPC server is stopped")
 		rpcTasks.Done()
 	}()
 	<-appctl.ServerRPCServerStarted
@@ -273,7 +383,7 @@ var serverRunFunc = func(s []string) error {
 	if config == nil {
 		config, err = appctl.LoadServerConfig()
 		if err != nil {
-			return fmt.Errorf(stderror.LoadServerConfigFailedErr, err)
+			return fmt.Errorf(stderror.GetServerConfigFailedErr, err)
 		}
 	}
 
@@ -283,71 +393,83 @@ var serverRunFunc = func(s []string) error {
 		log.SetLevel(loggingLevel)
 	}
 
+	// Load previous metrics if possible.
+	if err := os.MkdirAll("/var/lib/mita", 0775); err == nil {
+		const metricsDumpPath = "/var/lib/mita/metrics.pb"
+		metrics.SetMetricsDumpFilePath(metricsDumpPath)
+		if err := metrics.LoadMetricsFromDump(); err == nil {
+			log.Infof("Loaded previous metrics from %s", metricsDumpPath)
+		} else {
+			log.Infof("Unable to load previous metrics: %v", err)
+		}
+		if err := metrics.EnableMetricsDump(); err != nil {
+			log.Warnf("Failed to enable metrics dump: %v", err)
+		}
+	}
+
 	// Disable client side metrics.
 	if clientDecryptionMetricGroup := metrics.GetMetricGroupByName(cipher.ClientDecryptionMetricGroupName); clientDecryptionMetricGroup != nil {
 		clientDecryptionMetricGroup.DisableLogging()
 	}
-	if httpMetricGroup := metrics.GetMetricGroupByName(http2socks.HTTPMetricGroupName); httpMetricGroup != nil {
+	if httpMetricGroup := metrics.GetMetricGroupByName(socks5.HTTPMetricGroupName); httpMetricGroup != nil {
 		httpMetricGroup.DisableLogging()
+	}
+
+	// Detect and log TCP congestion control algorithm.
+	if algo := common.TCPCongestionControlAlgorithm(); algo != "" {
+		log.Infof("TCP congestion control algorithm is %q", algo)
 	}
 
 	// Start proxy if server config is valid.
 	if err = appctl.ValidateFullServerConfig(config); err == nil {
 		appctl.SetAppStatus(appctlpb.AppStatus_STARTING)
 
-		// Set MTU for UDP sessions.
+		mux := protocol.NewMux(false).SetServerUsers(appctl.UserListToMap(config.GetUsers()))
+		appctl.SetServerMuxRef(mux)
+		mtu := common.DefaultMTU
 		if config.GetMtu() != 0 {
-			udpsession.SetGlobalMTU(config.GetMtu())
+			mtu = int(config.GetMtu())
 		}
+		endpoints, err := appctl.PortBindingsToUnderlayProperties(config.GetPortBindings(), mtu)
+		if err != nil {
+			return err
+		}
+		mux.SetEndpoints(endpoints)
 
-		n := len(config.GetPortBindings())
+		// Create the egress socks5 server.
+		socks5Config := &socks5.Config{
+			AllowLocalDestination: config.GetAdvancedSettings().GetAllowLocalDestination(),
+			AuthOpts: socks5.Auth{
+				ClientSideAuthentication: true,
+			},
+			DualStackPreference: common.DualStackPreference(config.GetDns().GetDualStack()),
+			EgressController:    egress.NewSocks5Controller(config.GetEgress()),
+			HandshakeTimeout:    10 * time.Second,
+		}
+		socks5Server, err := socks5.New(socks5Config)
+		if err != nil {
+			return fmt.Errorf(stderror.CreateSocks5ServerFailedErr, err)
+		}
+		appctl.SetSocks5Server(socks5Server)
+
+		// Run the egress socks5 server in the background.
 		var proxyTasks sync.WaitGroup
 		var initProxyTasks sync.WaitGroup
-		proxyTasks.Add(n)
-		initProxyTasks.Add(n)
+		proxyTasks.Add(1)
+		initProxyTasks.Add(1)
+		go func() {
+			if err = mux.Start(); err != nil {
+				log.Fatalf("socks5 server listening failed: %v", err)
+			}
+			initProxyTasks.Done()
 
-		for i := 0; i < n; i++ {
-			// Create the egress socks5 server.
-			socks5Config := &socks5.Config{
-				AllowLocalDestination: config.GetAdvancedSettings().GetAllowLocalDestination(),
+			log.Infof("mita server daemon socks5 server is running")
+			if err = socks5Server.Serve(mux); err != nil {
+				log.Fatalf("run socks5 server failed: %v", err)
 			}
-			socks5Server, err := socks5.New(socks5Config)
-			if err != nil {
-				return fmt.Errorf(stderror.CreateSocks5ServerFailedErr, err)
-			}
-			protocol := config.GetPortBindings()[i].GetProtocol()
-			port := config.GetPortBindings()[i].GetPort()
-			if err := appctl.GetSocks5ServerGroup().Add(protocol.String(), int(port), socks5Server); err != nil {
-				return fmt.Errorf(stderror.AddSocks5ServerToGroupFailedErr, err)
-			}
-
-			// Run the egress socks5 server in the background.
-			go func() {
-				socks5Addr := util.MaybeDecorateIPv6(util.AllIPAddr()) + ":" + strconv.Itoa(int(port))
-				var l net.Listener
-				var err error
-				if protocol == appctlpb.TransportProtocol_TCP {
-					l, err = tcpsession.ListenWithOptions(socks5Addr, appctl.UserListToMap(config.GetUsers()))
-					if err != nil {
-						log.Fatalf("tcpsession.ListenWithOptions(%q) failed: %v", socks5Addr, err)
-					}
-				} else if protocol == appctlpb.TransportProtocol_UDP {
-					l, err = udpsession.ListenWithOptions(socks5Addr, appctl.UserListToMap(config.GetUsers()))
-					if err != nil {
-						log.Fatalf("udpsession.ListenWithOptions(%q) failed: %v", socks5Addr, err)
-					}
-				} else {
-					log.Fatalf("found unknown transport protocol %s in server config", protocol.String())
-				}
-				initProxyTasks.Done()
-				log.Infof("mieru server daemon socks5 server %q is running", socks5Addr)
-				if err = socks5Server.Serve(l); err != nil {
-					log.Fatalf("run socks5 server %q failed: %v", socks5Addr, err)
-				}
-				log.Infof("mieru server daemon socks5 server %q is stopped", socks5Addr)
-				proxyTasks.Done()
-			}()
-		}
+			log.Infof("mita server daemon socks5 server is stopped")
+			proxyTasks.Done()
+		}()
 
 		initProxyTasks.Wait()
 		metrics.EnableLogging()
@@ -363,13 +485,16 @@ var serverRunFunc = func(s []string) error {
 	// Stop CPU profiling, if previously started.
 	pprof.StopCPUProfile()
 
-	log.Infof("mieru server daemon exit now")
+	log.Infof("mita server daemon exit now")
 	return nil
 }
 
 var serverStopFunc = func(s []string) error {
 	appStatus, err := appctl.GetServerStatusWithRPC(context.Background())
 	if err != nil {
+		if stderror.IsConnRefused(err) {
+			return fmt.Errorf(stderror.ServerNotRunningWithCommand)
+		}
 		return fmt.Errorf(stderror.GetServerStatusFailedErr, err)
 	}
 	if err := appctl.IsServerDaemonRunning(appStatus); err != nil {
@@ -389,7 +514,32 @@ var serverStopFunc = func(s []string) error {
 	if _, err = client.Stop(timedctx, &appctlpb.Empty{}); err != nil {
 		return fmt.Errorf(stderror.StopServerProxyFailedErr, err)
 	}
-	log.Infof("mieru server proxy is stopped")
+	log.Infof("mita server proxy is stopped")
+	return nil
+}
+
+var serverReloadFunc = func(s []string) error {
+	appStatus, err := appctl.GetServerStatusWithRPC(context.Background())
+	if err != nil {
+		if stderror.IsConnRefused(err) {
+			return fmt.Errorf(stderror.ServerNotRunningWithCommand)
+		}
+		return fmt.Errorf(stderror.GetServerStatusFailedErr, err)
+	}
+	if err := appctl.IsServerDaemonRunning(appStatus); err != nil {
+		return fmt.Errorf(stderror.ServerNotRunningErr, err)
+	}
+
+	client, err := appctl.NewServerLifecycleRPCClient()
+	if err != nil {
+		return fmt.Errorf(stderror.CreateServerLifecycleRPCClientFailedErr, err)
+	}
+	timedctx, cancelFunc := context.WithTimeout(context.Background(), appctl.RPCTimeout)
+	defer cancelFunc()
+	if _, err = client.Reload(timedctx, &appctlpb.Empty{}); err != nil {
+		return fmt.Errorf(stderror.ReloadServerFailedErr, err)
+	}
+	log.Infof("mita server is reloaded")
 	return nil
 }
 
@@ -397,15 +547,14 @@ var serverStatusFunc = func(s []string) error {
 	appStatus, err := appctl.GetServerStatusWithRPC(context.Background())
 	if err != nil {
 		if stderror.IsConnRefused(err) {
-			// This is the most common reason, no need to show more details.
-			return fmt.Errorf(stderror.ServerNotRunning)
+			return fmt.Errorf(stderror.ServerNotRunningWithCommand)
 		} else if stderror.IsPermissionDenied(err) {
 			currentUser, err := user.Current()
 			if err != nil {
 				cmd := strings.Join(s, " ")
 				return fmt.Errorf("unable to determine the OS user which executed command %q", cmd)
 			}
-			return fmt.Errorf("unable to connect to mieru server daemon through %q, please retry after running \"sudo usermod -a -G mita %s\" command and reboot the system", appctl.ServerUDS, currentUser.Username)
+			return fmt.Errorf("unable to connect to mita server daemon via %q; please retry after running \"sudo usermod -a -G mita %s\" command and logout the system, then login again", appctl.ServerUDS(), currentUser.Username)
 		} else {
 			return fmt.Errorf(stderror.GetServerStatusFailedErr, err)
 		}
@@ -416,7 +565,7 @@ var serverStatusFunc = func(s []string) error {
 	if err := appctl.IsServerProxyRunning(appStatus); err != nil {
 		log.Infof("%s", err.Error())
 	} else {
-		log.Infof("mieru server status is %q", appctlpb.AppStatus_RUNNING.String())
+		log.Infof("mita server status is %q", appctlpb.AppStatus_RUNNING.String())
 	}
 	return nil
 }
@@ -424,6 +573,9 @@ var serverStatusFunc = func(s []string) error {
 var serverApplyConfigFunc = func(s []string) error {
 	appStatus, err := appctl.GetServerStatusWithRPC(context.Background())
 	if err != nil {
+		if stderror.IsConnRefused(err) {
+			return fmt.Errorf(stderror.ServerNotRunningWithCommand)
+		}
 		return fmt.Errorf(stderror.GetServerStatusFailedErr, err)
 	}
 	if err := appctl.IsServerDaemonRunning(appStatus); err != nil {
@@ -436,8 +588,8 @@ var serverApplyConfigFunc = func(s []string) error {
 		return fmt.Errorf("os.ReadFile(%q) failed: %w", path, err)
 	}
 	patch := &appctlpb.ServerConfig{}
-	if err = appctl.Unmarshal(b, patch); err != nil {
-		return fmt.Errorf("protojson.Unmarshal() failed: %w", err)
+	if err = common.UnmarshalJSON(b, patch); err != nil {
+		return fmt.Errorf("common.UnmarshalJSON() failed: %w", err)
 	}
 	if err := appctl.ValidateServerConfigPatch(patch); err != nil {
 		return fmt.Errorf(stderror.ValidateServerConfigPatchFailedErr, err)
@@ -459,6 +611,9 @@ var serverApplyConfigFunc = func(s []string) error {
 var serverDescribeConfigFunc = func(s []string) error {
 	appStatus, err := appctl.GetServerStatusWithRPC(context.Background())
 	if err != nil {
+		if stderror.IsConnRefused(err) {
+			return fmt.Errorf(stderror.ServerNotRunningWithCommand)
+		}
 		return fmt.Errorf(stderror.GetServerStatusFailedErr, err)
 	}
 	if err := appctl.IsServerDaemonRunning(appStatus); err != nil {
@@ -475,9 +630,9 @@ var serverDescribeConfigFunc = func(s []string) error {
 	if err != nil {
 		return fmt.Errorf(stderror.GetServerConfigFailedErr, err)
 	}
-	jsonBytes, err := appctl.Marshal(config)
+	jsonBytes, err := common.MarshalJSON(config)
 	if err != nil {
-		return fmt.Errorf("protojson.Marshal() failed: %w", err)
+		return fmt.Errorf("common.MarshalJSON() failed: %w", err)
 	}
 	log.Infof("%s", string(jsonBytes))
 	return nil
@@ -486,6 +641,9 @@ var serverDescribeConfigFunc = func(s []string) error {
 var serverDeleteUserFunc = func(s []string) error {
 	appStatus, err := appctl.GetServerStatusWithRPC(context.Background())
 	if err != nil {
+		if stderror.IsConnRefused(err) {
+			return fmt.Errorf(stderror.ServerNotRunningWithCommand)
+		}
 		return fmt.Errorf(stderror.GetServerStatusFailedErr, err)
 	}
 	if err := appctl.IsServerDaemonRunning(appStatus); err != nil {
@@ -520,6 +678,69 @@ var serverDeleteUserFunc = func(s []string) error {
 	_, err = client.SetConfig(timedctx, config)
 	if err != nil {
 		return fmt.Errorf(stderror.SetServerConfigFailedErr, err)
+	}
+	return nil
+}
+
+var serverCheckUpdateFunc = func(s []string) error {
+	_, msg, err := updater.CheckUpdate("")
+	if err != nil {
+		return fmt.Errorf("check update failed: %w", err)
+	}
+	log.Infof("%s", msg)
+	return nil
+}
+
+var serverGetMetricsFunc = func(s []string) error {
+	appStatus, err := appctl.GetServerStatusWithRPC(context.Background())
+	if err != nil {
+		if stderror.IsConnRefused(err) {
+			return fmt.Errorf(stderror.ServerNotRunningWithCommand)
+		}
+		return fmt.Errorf(stderror.GetServerStatusFailedErr, err)
+	}
+	if err := appctl.IsServerDaemonRunning(appStatus); err != nil {
+		return fmt.Errorf(stderror.ServerNotRunningErr, err)
+	}
+
+	client, err := appctl.NewServerLifecycleRPCClient()
+	if err != nil {
+		return fmt.Errorf(stderror.CreateServerLifecycleRPCClientFailedErr, err)
+	}
+	timedctx, cancelFunc := context.WithTimeout(context.Background(), appctl.RPCTimeout)
+	defer cancelFunc()
+	metrics, err := client.GetMetrics(timedctx, &appctlpb.Empty{})
+	if err != nil {
+		return fmt.Errorf(stderror.GetMetricsFailedErr, err)
+	}
+	log.Infof("%s", metrics.GetJson())
+	return nil
+}
+
+var serverGetConnectionsFunc = func(s []string) error {
+	appStatus, err := appctl.GetServerStatusWithRPC(context.Background())
+	if err != nil {
+		if stderror.IsConnRefused(err) {
+			return fmt.Errorf(stderror.ServerNotRunningWithCommand)
+		}
+		return fmt.Errorf(stderror.GetServerStatusFailedErr, err)
+	}
+	if err := appctl.IsServerDaemonRunning(appStatus); err != nil {
+		return fmt.Errorf(stderror.ServerNotRunningErr, err)
+	}
+
+	client, err := appctl.NewServerLifecycleRPCClient()
+	if err != nil {
+		return fmt.Errorf(stderror.CreateServerLifecycleRPCClientFailedErr, err)
+	}
+	timedctx, cancelFunc := context.WithTimeout(context.Background(), appctl.RPCTimeout)
+	defer cancelFunc()
+	info, err := client.GetSessionInfo(timedctx, &appctlpb.Empty{})
+	if err != nil {
+		return fmt.Errorf(stderror.GetConnectionsFailedErr, err)
+	}
+	for _, line := range info.GetTable() {
+		log.Infof("%s", line)
 	}
 	return nil
 }
@@ -566,6 +787,29 @@ var serverGetHeapProfileFunc = func(s []string) error {
 		return fmt.Errorf(stderror.GetHeapProfileFailedErr, err)
 	}
 	log.Infof("heap profile is saved to %q", s[3])
+	return nil
+}
+
+var serverGetMemoryStatisticsFunc = func(s []string) error {
+	appStatus, err := appctl.GetServerStatusWithRPC(context.Background())
+	if err != nil {
+		return fmt.Errorf(stderror.GetServerStatusFailedErr, err)
+	}
+	if err := appctl.IsServerDaemonRunning(appStatus); err != nil {
+		return fmt.Errorf(stderror.ServerNotRunningErr, err)
+	}
+
+	client, err := appctl.NewServerLifecycleRPCClient()
+	if err != nil {
+		return fmt.Errorf(stderror.CreateServerLifecycleRPCClientFailedErr, err)
+	}
+	timedctx, cancelFunc := context.WithTimeout(context.Background(), appctl.RPCTimeout)
+	defer cancelFunc()
+	memStats, err := client.GetMemoryStatistics(timedctx, &appctlpb.Empty{})
+	if err != nil {
+		return fmt.Errorf(stderror.GetMemoryStatisticsFailedErr, err)
+	}
+	log.Infof("%s", memStats.GetJson())
 	return nil
 }
 
@@ -626,13 +870,13 @@ func updateServerUDSPermission() error {
 	}
 	mitaGid, err := strconv.Atoi(mitaGidStr)
 	if err != nil {
-		return fmt.Errorf("convert mieru UID with strconv.Atoi(%q) failed: %w", mitaGidStr, err)
+		return fmt.Errorf("convert mita UID with strconv.Atoi(%q) failed: %w", mitaGidStr, err)
 	}
-	if err = os.Chown(appctl.ServerUDS, rootUid, mitaGid); err != nil {
-		return fmt.Errorf("os.Chown(%q) failed: %w", appctl.ServerUDS, err)
+	if err = os.Chown(appctl.ServerUDS(), rootUid, mitaGid); err != nil {
+		return fmt.Errorf("os.Chown(%q) failed: %w", appctl.ServerUDS(), err)
 	}
-	if err = os.Chmod(appctl.ServerUDS, 0770); err != nil {
-		return fmt.Errorf("os.Chmod(%q) failed: %w", appctl.ServerUDS, err)
+	if err = os.Chmod(appctl.ServerUDS(), 0770); err != nil {
+		return fmt.Errorf("os.Chmod(%q) failed: %w", appctl.ServerUDS(), err)
 	}
 	return nil
 }

@@ -32,7 +32,7 @@ PROJECT_NAME=$(shell basename "${ROOT}")
 # - pkg/version/current.go
 #
 # Use `tools/bump_version.sh` script to change all those files at one shot.
-VERSION="1.15.1"
+VERSION="3.11.1"
 
 # Build binaries and installation packages.
 .PHONY: build
@@ -40,42 +40,69 @@ build: bin deb rpm
 
 # Build binaries.
 .PHONY: bin
-bin: lib client-mac client-linux client-windows-amd64 server-linux
+bin: lib client-android client-linux client-mac client-windows server-linux
 
 # Compile go libraries and run unit tests.
 .PHONY: lib
-lib: fmt
+lib: fmt vet
 	CGO_ENABLED=0 go build -v ./...
 	CGO_ENABLED=0 go test -timeout=1m0s -coverprofile coverage.out ./...
 	go tool cover -html coverage.out -o coverage.html
 
-# Build MacOS clients.
-.PHONY: client-mac
-client-mac: client-mac-amd64 client-mac-arm64
+# Format source code.
+.PHONY: fmt
+fmt:
+	CGO_ENABLED=0 go fmt ./...
 
-# Build MacOS amd64 client.
-.PHONY: client-mac-amd64
-client-mac-amd64:
-	mkdir -p release/macos/amd64
-	env GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o release/macos/amd64/mieru cmd/mieru/mieru.go
-	cd release/macos/amd64;\
-		sha256sum mieru > mieru_${VERSION}_macos_amd64.sha256.txt;\
-		tar -zcvf mieru_${VERSION}_macos_amd64.tar.gz mieru;\
-		sha256sum mieru_${VERSION}_macos_amd64.tar.gz > mieru_${VERSION}_macos_amd64.tar.gz.sha256.txt
-	mv release/macos/amd64/mieru_${VERSION}_macos_amd64.tar.gz release/
-	mv release/macos/amd64/mieru_${VERSION}_macos_amd64.tar.gz.sha256.txt release/
+# Run go vet.
+.PHONY: vet
+vet:
+	CGO_ENABLED=0 go vet ./...
 
-# Build MacOS arm64 client.
-.PHONY: client-mac-arm64
-client-mac-arm64:
-	mkdir -p release/macos/arm64
-	env GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o release/macos/arm64/mieru cmd/mieru/mieru.go
-	cd release/macos/arm64;\
-		sha256sum mieru > mieru_${VERSION}_macos_arm64.sha256.txt;\
-		tar -zcvf mieru_${VERSION}_macos_arm64.tar.gz mieru;\
-		sha256sum mieru_${VERSION}_macos_arm64.tar.gz > mieru_${VERSION}_macos_arm64.tar.gz.sha256.txt
-	mv release/macos/arm64/mieru_${VERSION}_macos_arm64.tar.gz release/
-	mv release/macos/arm64/mieru_${VERSION}_macos_arm64.tar.gz.sha256.txt release/
+# Run benchmark.
+.PHONY: bench
+bench:
+	CGO_ENABLED=0 go test -bench=. -benchtime=5s ./pkg/cipher
+
+# Generate vendor directory.
+.PHONY: vendor
+vendor:
+	go mod tidy
+	go mod vendor
+
+# Build Android clients.
+.PHONY: client-android
+client-android: client-android-amd64 client-android-arm64
+
+# Build Android amd64 client.
+.PHONY: client-android-amd64
+client-android-amd64:
+	if [ ! -z $$(command -v gcc) ]; then\
+		mkdir -p release/android/amd64;\
+		env GOOS=android GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o release/android/amd64/mieru cmd/mieru/mieru.go;\
+		cd release/android/amd64;\
+		sha256sum mieru > mieru_${VERSION}_android_amd64.sha256.txt;\
+		tar -zcvf mieru_${VERSION}_android_amd64.tar.gz mieru;\
+		sha256sum mieru_${VERSION}_android_amd64.tar.gz > mieru_${VERSION}_android_amd64.tar.gz.sha256.txt;\
+		cd "${ROOT}";\
+		mv release/android/amd64/mieru_${VERSION}_android_amd64.tar.gz release/;\
+		mv release/android/amd64/mieru_${VERSION}_android_amd64.tar.gz.sha256.txt release/;\
+	fi
+
+# Build Android arm64 client.
+.PHONY: client-android-arm64
+client-android-arm64:
+	if [ ! -z $$(command -v gcc) ]; then\
+		mkdir -p release/android/arm64;\
+		env GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o release/android/arm64/mieru cmd/mieru/mieru.go;\
+		cd release/android/arm64;\
+		sha256sum mieru > mieru_${VERSION}_android_arm64.sha256.txt;\
+		tar -zcvf mieru_${VERSION}_android_arm64.tar.gz mieru;\
+		sha256sum mieru_${VERSION}_android_arm64.tar.gz > mieru_${VERSION}_android_arm64.tar.gz.sha256.txt;\
+		cd "${ROOT}";\
+		mv release/android/arm64/mieru_${VERSION}_android_arm64.tar.gz release/;\
+		mv release/android/arm64/mieru_${VERSION}_android_arm64.tar.gz.sha256.txt release/;\
+	fi
 
 # Build linux clients.
 .PHONY: client-linux
@@ -85,7 +112,7 @@ client-linux: client-linux-amd64 client-linux-arm64 client-linux-armv7 client-li
 .PHONY: client-linux-amd64
 client-linux-amd64:
 	mkdir -p release/linux/amd64
-	env GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o release/linux/amd64/mieru cmd/mieru/mieru.go
+	env GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o release/linux/amd64/mieru cmd/mieru/mieru.go
 	cd release/linux/amd64;\
 		sha256sum mieru > mieru_${VERSION}_linux_amd64.sha256.txt;\
 		tar -zcvf mieru_${VERSION}_linux_amd64.tar.gz mieru;\
@@ -97,7 +124,7 @@ client-linux-amd64:
 .PHONY: client-linux-arm64
 client-linux-arm64:
 	mkdir -p release/linux/arm64
-	env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o release/linux/arm64/mieru cmd/mieru/mieru.go
+	env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o release/linux/arm64/mieru cmd/mieru/mieru.go
 	cd release/linux/arm64;\
 		sha256sum mieru > mieru_${VERSION}_linux_arm64.sha256.txt;\
 		tar -zcvf mieru_${VERSION}_linux_arm64.tar.gz mieru;\
@@ -109,7 +136,7 @@ client-linux-arm64:
 .PHONY: client-linux-armv7
 client-linux-armv7:
 	mkdir -p release/linux/armv7
-	env GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -ldflags="-s -w" -o release/linux/armv7/mieru cmd/mieru/mieru.go
+	env GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o release/linux/armv7/mieru cmd/mieru/mieru.go
 	cd release/linux/armv7;\
 		sha256sum mieru > mieru_${VERSION}_linux_armv7.sha256.txt;\
 		tar -zcvf mieru_${VERSION}_linux_armv7.tar.gz mieru;\
@@ -121,7 +148,7 @@ client-linux-armv7:
 .PHONY: client-linux-riscv64
 client-linux-riscv64:
 	mkdir -p release/linux/riscv64
-	env GOOS=linux GOARCH=riscv64 CGO_ENABLED=0 go build -ldflags="-s -w" -o release/linux/riscv64/mieru cmd/mieru/mieru.go
+	env GOOS=linux GOARCH=riscv64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o release/linux/riscv64/mieru cmd/mieru/mieru.go
 	cd release/linux/riscv64;\
 		sha256sum mieru > mieru_${VERSION}_linux_riscv64.sha256.txt;\
 		tar -zcvf mieru_${VERSION}_linux_riscv64.tar.gz mieru;\
@@ -129,17 +156,61 @@ client-linux-riscv64:
 	mv release/linux/riscv64/mieru_${VERSION}_linux_riscv64.tar.gz release/
 	mv release/linux/riscv64/mieru_${VERSION}_linux_riscv64.tar.gz.sha256.txt release/
 
+# Build MacOS clients.
+.PHONY: client-mac
+client-mac: client-mac-amd64 client-mac-arm64
+
+# Build MacOS amd64 client.
+.PHONY: client-mac-amd64
+client-mac-amd64:
+	mkdir -p release/macos/amd64
+	env GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o release/macos/amd64/mieru cmd/mieru/mieru.go
+	cd release/macos/amd64;\
+		sha256sum mieru > mieru_${VERSION}_macos_amd64.sha256.txt;\
+		tar -zcvf mieru_${VERSION}_macos_amd64.tar.gz mieru;\
+		sha256sum mieru_${VERSION}_macos_amd64.tar.gz > mieru_${VERSION}_macos_amd64.tar.gz.sha256.txt
+	mv release/macos/amd64/mieru_${VERSION}_macos_amd64.tar.gz release/
+	mv release/macos/amd64/mieru_${VERSION}_macos_amd64.tar.gz.sha256.txt release/
+
+# Build MacOS arm64 client.
+.PHONY: client-mac-arm64
+client-mac-arm64:
+	mkdir -p release/macos/arm64
+	env GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o release/macos/arm64/mieru cmd/mieru/mieru.go
+	cd release/macos/arm64;\
+		sha256sum mieru > mieru_${VERSION}_macos_arm64.sha256.txt;\
+		tar -zcvf mieru_${VERSION}_macos_arm64.tar.gz mieru;\
+		sha256sum mieru_${VERSION}_macos_arm64.tar.gz > mieru_${VERSION}_macos_arm64.tar.gz.sha256.txt
+	mv release/macos/arm64/mieru_${VERSION}_macos_arm64.tar.gz release/
+	mv release/macos/arm64/mieru_${VERSION}_macos_arm64.tar.gz.sha256.txt release/
+
+# Build windows clients.
+.PHONY: client-windows
+client-windows: client-windows-x86 client-windows-amd64
+
+# Build windows x86 client.
+.PHONY: client-windows-x86
+client-windows-x86:
+	mkdir -p release/windows/386
+	env GOOS=windows GOARCH=386 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o release/windows/386/mieru.exe cmd/mieru/mieru.go
+	cd release/windows/386;\
+		sha256sum mieru.exe > mieru_${VERSION}_windows_x86.exe.sha256.txt;\
+		zip -r mieru_${VERSION}_windows_x86.zip mieru.exe;\
+		sha256sum mieru_${VERSION}_windows_x86.zip > mieru_${VERSION}_windows_x86.zip.sha256.txt
+	mv release/windows/386/mieru_${VERSION}_windows_x86.zip release/
+	mv release/windows/386/mieru_${VERSION}_windows_x86.zip.sha256.txt release/
+
 # Build windows amd64 client.
 .PHONY: client-windows-amd64
 client-windows-amd64:
-	mkdir -p release/windows
-	env GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o release/windows/mieru.exe cmd/mieru/mieru.go
-	cd release/windows;\
-		sha256sum mieru.exe > mieru_${VERSION}_windows.exe.sha256.txt;\
+	mkdir -p release/windows/amd64
+	env GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o release/windows/amd64/mieru.exe cmd/mieru/mieru.go
+	cd release/windows/amd64;\
+		sha256sum mieru.exe > mieru_${VERSION}_windows_amd64.exe.sha256.txt;\
 		zip -r mieru_${VERSION}_windows_amd64.zip mieru.exe;\
 		sha256sum mieru_${VERSION}_windows_amd64.zip > mieru_${VERSION}_windows_amd64.zip.sha256.txt
-	mv release/windows/mieru_${VERSION}_windows_amd64.zip release/
-	mv release/windows/mieru_${VERSION}_windows_amd64.zip.sha256.txt release/
+	mv release/windows/amd64/mieru_${VERSION}_windows_amd64.zip release/
+	mv release/windows/amd64/mieru_${VERSION}_windows_amd64.zip.sha256.txt release/
 
 # Build linux servers.
 .PHONY: server-linux
@@ -149,7 +220,7 @@ server-linux: server-linux-amd64 server-linux-arm64
 .PHONY: server-linux-amd64
 server-linux-amd64:
 	mkdir -p release/linux/amd64
-	env GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o release/linux/amd64/mita cmd/mita/mita.go
+	env GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o release/linux/amd64/mita cmd/mita/mita.go
 	cd release/linux/amd64;\
 		sha256sum mita > mita_${VERSION}_linux_amd64.sha256.txt
 
@@ -157,7 +228,7 @@ server-linux-amd64:
 .PHONY: server-linux-arm64
 server-linux-arm64:
 	mkdir -p release/linux/arm64
-	env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o release/linux/arm64/mita cmd/mita/mita.go
+	env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o release/linux/arm64/mita cmd/mita/mita.go
 	cd release/linux/arm64;\
 		sha256sum mita > mita_${VERSION}_linux_arm64.sha256.txt
 
@@ -173,7 +244,7 @@ deb-client-amd64: client-linux-amd64
 		mkdir -p build/package/mieru/amd64/debian/usr/bin;\
 		cp release/linux/amd64/mieru build/package/mieru/amd64/debian/usr/bin/;\
 		cd build/package/mieru/amd64;\
-		fakeroot dpkg-deb --build debian .;\
+		fakeroot dpkg-deb -Zxz --build debian .;\
 		cd "${ROOT}";\
 		mv build/package/mieru/amd64/mieru_${VERSION}_amd64.deb release/;\
 		cd release;\
@@ -188,7 +259,7 @@ deb-client-arm64: client-linux-arm64
 		mkdir -p build/package/mieru/arm64/debian/usr/bin;\
 		cp release/linux/arm64/mieru build/package/mieru/arm64/debian/usr/bin/;\
 		cd build/package/mieru/arm64;\
-		fakeroot dpkg-deb --build debian .;\
+		fakeroot dpkg-deb -Zxz --build debian .;\
 		cd "${ROOT}";\
 		mv build/package/mieru/arm64/mieru_${VERSION}_arm64.deb release/;\
 		cd release;\
@@ -203,7 +274,7 @@ deb-server-amd64: server-linux-amd64
 		mkdir -p build/package/mita/amd64/debian/usr/bin;\
 		cp release/linux/amd64/mita build/package/mita/amd64/debian/usr/bin/;\
 		cd build/package/mita/amd64;\
-		fakeroot dpkg-deb --build debian .;\
+		fakeroot dpkg-deb -Zxz --build debian .;\
 		cd "${ROOT}";\
 		mv build/package/mita/amd64/mita_${VERSION}_amd64.deb release/;\
 		cd release;\
@@ -218,7 +289,7 @@ deb-server-arm64: server-linux-arm64
 		mkdir -p build/package/mita/arm64/debian/usr/bin;\
 		cp release/linux/arm64/mita build/package/mita/arm64/debian/usr/bin/;\
 		cd build/package/mita/arm64;\
-		fakeroot dpkg-deb --build debian .;\
+		fakeroot dpkg-deb -Zxz --build debian .;\
 		cd "${ROOT}";\
 		mv build/package/mita/arm64/mita_${VERSION}_arm64.deb release/;\
 		cd release;\
@@ -288,8 +359,11 @@ rpm-server-arm64: server-linux-arm64
 # Build binaries used in integration tests.
 .PHONY: test-binary
 test-binary:
-	CGO_ENABLED=0 go build cmd/mieru/mieru.go
-	CGO_ENABLED=0 go build cmd/mita/mita.go
+	CGO_ENABLED=0 go build -ldflags="-X 'github.com/enfein/mieru/pkg/log.LogPrefix=C'" -o mieru cmd/mieru/mieru.go
+	CGO_ENABLED=0 go build -ldflags="-X 'github.com/enfein/mieru/pkg/log.LogPrefix=S'" -o mita cmd/mita/mita.go
+	CGO_ENABLED=1 go build -race -ldflags="-X 'github.com/enfein/mieru/pkg/log.LogPrefix=C2'" -o mieru2 cmd/mieru/mieru.go
+	CGO_ENABLED=1 go build -race -ldflags="-X 'github.com/enfein/mieru/pkg/log.LogPrefix=S2'" -o mita2 cmd/mita/mita.go
+	CGO_ENABLED=0 go build test/cmd/exampleapiclient/exampleapiclient.go
 	CGO_ENABLED=0 go build test/cmd/httpserver/httpserver.go
 	CGO_ENABLED=0 go build test/cmd/sockshttpclient/sockshttpclient.go
 	CGO_ENABLED=0 go build test/cmd/socksudpclient/socksudpclient.go
@@ -300,25 +374,17 @@ test-binary:
 test-container: test-binary
 	if [ ! -z $$(command -v docker) ]; then\
 		docker build -t mieru_httptest:${SHORT_SHA} -f test/deploy/httptest/Dockerfile .;\
-		rm -f mieru mita httpserver sockshttpclient socksudpclient udpserver;\
+		docker build -t mieru_proxychain:${SHORT_SHA} -f test/deploy/proxychain/Dockerfile .;\
 	fi
+	rm -f exampleapiclient mieru mieru2 mita mita2 httpserver sockshttpclient socksudpclient udpserver
 
 # Run docker integration tests.
 .PHONY: run-container-test
 run-container-test: test-container
 	if [ ! -z $$(command -v docker) ]; then\
 		docker run mieru_httptest:${SHORT_SHA};\
+		docker run mieru_proxychain:${SHORT_SHA};\
 	fi
-
-# Format source code.
-.PHONY: fmt
-fmt:
-	CGO_ENABLED=0 go fmt ./...
-
-# Run go vet.
-.PHONY: vet
-vet:
-	CGO_ENABLED=0 go vet ./...
 
 # Generate source code from protobuf.
 # Call this after proto files are changed.
@@ -348,17 +414,24 @@ protobuf:
 	fi
 
 	PATH=${PATH}:"${ROOT}/tools/build" ${ROOT}/tools/build/protoc -I="${ROOT}/pkg/appctl/proto" \
-		--go_out="${ROOT}/pkg/appctl" --go_opt=module="github.com/enfein/mieru/pkg/appctl" \
-		--go-grpc_out="${ROOT}/pkg/appctl" --go-grpc_opt=module="github.com/enfein/mieru/pkg/appctl" \
+		--go_out="${ROOT}/pkg/appctl" --go_opt=module="github.com/enfein/mieru/v3/pkg/appctl" \
+		--go-grpc_out="${ROOT}/pkg/appctl" --go-grpc_opt=module="github.com/enfein/mieru/v3/pkg/appctl" \
 		--proto_path="${ROOT}/pkg" \
+		"${ROOT}/pkg/appctl/proto/base.proto" \
 		"${ROOT}/pkg/appctl/proto/clientcfg.proto" \
-		"${ROOT}/pkg/appctl/proto/debug.proto" \
-		"${ROOT}/pkg/appctl/proto/empty.proto" \
-		"${ROOT}/pkg/appctl/proto/endpoint.proto" \
-		"${ROOT}/pkg/appctl/proto/lifecycle.proto" \
-		"${ROOT}/pkg/appctl/proto/logging.proto" \
-		"${ROOT}/pkg/appctl/proto/servercfg.proto" \
-		"${ROOT}/pkg/appctl/proto/user.proto"
+		"${ROOT}/pkg/appctl/proto/misc.proto" \
+		"${ROOT}/pkg/appctl/proto/rpc.proto" \
+		"${ROOT}/pkg/appctl/proto/servercfg.proto"
+
+	PATH=${PATH}:"${ROOT}/tools/build" ${ROOT}/tools/build/protoc -I="${ROOT}/pkg/metrics/proto" \
+		--go_out="${ROOT}/pkg/metrics" --go_opt=module="github.com/enfein/mieru/v3/pkg/metrics" \
+		--proto_path="${ROOT}/pkg" \
+		"${ROOT}/pkg/metrics/proto/metrics.proto"
+
+	PATH=${PATH}:"${ROOT}/tools/build" ${ROOT}/tools/build/protoc -I="${ROOT}/pkg/version/updater/proto" \
+		--go_out="${ROOT}/pkg/version/updater" --go_opt=module="github.com/enfein/mieru/v3/pkg/version/updater" \
+		--proto_path="${ROOT}/pkg" \
+		"${ROOT}/pkg/version/updater/proto/history.proto"
 
 # Package source code.
 .PHONY: src
